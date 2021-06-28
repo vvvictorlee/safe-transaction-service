@@ -127,8 +127,10 @@ MASTER_COPIES: Dict[EthereumNetwork, List[Tuple[str, int, str]]] = {
         ('0x3E5c63644E683549055b9Be8653de26E0B4CD36E', 13736914, '1.3.0+L2'),
         ('0xd9Db270c1B5E3Bd161E8c8503c55cEABeE709552', 13736914, '1.3.0'),
     ],
+    70: [
+        ('0xb4A7C7da1631CF60A2Cf23ABc86986f99a1A7f70', 1461828, '1.3.0'),
+    ],
     170: [
-        ('0xE51abdf814f8854941b9Fe8e3A4F65CAB4e7A4a8', 13714, '1.3.0+L2'),
         ('0xb4A7C7da1631CF60A2Cf23ABc86986f99a1A7f70', 13714, '1.3.0'),
     ],
 }
@@ -176,7 +178,10 @@ PROXY_FACTORIES: Dict[EthereumNetwork, List[Tuple[str, int]]] = {
     EthereumNetwork.MUMBAI: [
         ('0xa6B71E26C5e0845f74c812102Ca7114b6a896AB2', 13736914),  # v1.3.0
     ],
-    170: [
+    70: [
+        ('0xE89ce3bcD35bA068A9F9d906896D3d03Ad5C30EC', 1461801),  # v1.3.0
+    ],
+   170: [
         ('0xE89ce3bcD35bA068A9F9d906896D3d03Ad5C30EC', 13734),  # v1.3.0
     ],
 }

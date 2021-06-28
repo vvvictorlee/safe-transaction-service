@@ -77,6 +77,12 @@ The service should be running in `localhost:8000`. You can test everything is se
 curl 'http://localhost:8000/api/v1/about/'
 ```
 
+```bash
+curl 'https://safe-transaction.hoosmartchain.com/api/v1/about/'
+```
+
+
+
 For example, to set up a Göerli node:
 
 Run an OpenEthereum node in your local computer:
@@ -109,7 +115,7 @@ the `network id` instead of the `Enum`.
 the **GnosisSafe/GnosisSafeL2**.
 
 ## Use admin interface
-Services come with a basic administration web ui (provided by Django) by default on http://localhost:8000/admin/
+Services come with a basic administration web ui (provided by Django) by default on http://localhost:3263/admin/
 
 A user must be created to get access:
 ```bash
