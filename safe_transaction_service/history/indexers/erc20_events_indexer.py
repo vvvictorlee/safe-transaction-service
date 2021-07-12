@@ -9,7 +9,7 @@ from eth_abi.exceptions import DecodingError
 from requests import RequestException
 from web3.exceptions import BadFunctionCallOutput
 
-from gnosis.eth import EthereumClient
+from ..gnosis.eth import EthereumClient
 
 from ..models import EthereumEvent, SafeContract
 from .ethereum_indexer import EthereumIndexer

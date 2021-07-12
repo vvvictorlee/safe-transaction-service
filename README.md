@@ -121,6 +121,7 @@ A user must be created to get access:
 ```bash
 docker exec -it safe-transaction-service_web_1 python manage.py createsuperuser
 ```
+manage.py makemigrations
 
 ## Contributors
 - Denís Graña (denis@gnosis.pm)

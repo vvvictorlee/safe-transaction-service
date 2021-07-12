@@ -5,7 +5,7 @@ from django.core.management.base import BaseCommand
 import requests
 from requests import RequestException
 
-from gnosis.eth import EthereumClientProvider
+from ...gnosis.eth import EthereumClientProvider
 
 from safe_transaction_service import __version__
 

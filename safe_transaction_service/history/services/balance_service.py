@@ -13,7 +13,7 @@ from eth_typing import ChecksumAddress
 from redis import Redis
 from web3 import Web3
 
-from gnosis.eth import EthereumClient, EthereumClientProvider
+from ..gnosis.eth import EthereumClient, EthereumClientProvider
 
 from safe_transaction_service.tokens.clients import CannotGetPrice
 from safe_transaction_service.tokens.models import Token

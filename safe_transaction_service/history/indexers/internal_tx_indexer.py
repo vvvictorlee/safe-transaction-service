@@ -6,7 +6,7 @@ from django.db import transaction
 
 from requests import RequestException
 
-from gnosis.eth import EthereumClient
+from ..gnosis.eth import EthereumClient
 
 from safe_transaction_service.contracts.tx_decoder import (CannotDecode,
                                                            get_safe_tx_decoder)

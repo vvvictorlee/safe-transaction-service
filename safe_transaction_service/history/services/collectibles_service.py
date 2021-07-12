@@ -12,7 +12,7 @@ from cache_memoize import cache_memoize
 from cachetools import TTLCache, cachedmethod
 from redis import Redis
 
-from gnosis.eth import EthereumClient, EthereumClientProvider
+from ..gnosis.eth import EthereumClient, EthereumClientProvider
 
 from safe_transaction_service.tokens.constants import (
     CRYPTO_KITTIES_CONTRACT_ADDRESSES, ENS_CONTRACTS_WITH_TLD)

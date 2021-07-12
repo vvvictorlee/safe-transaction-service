@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Union
 
 from web3 import Web3
 
-from gnosis.eth import EthereumClient
+from ..gnosis.eth import EthereumClient
 from gnosis.eth.contracts import (get_cpk_factory_contract,
                                   get_proxy_factory_contract)
 from gnosis.safe import Safe

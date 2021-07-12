@@ -5,9 +5,9 @@ from typing import List, Optional, Sequence
 from web3.contract import ContractEvent
 from web3.types import EventData, LogReceipt
 
-from gnosis.eth import EthereumClient
-from gnosis.eth.constants import NULL_ADDRESS
-from gnosis.eth.contracts import (get_proxy_factory_contract,
+from ..gnosis.eth import EthereumClient
+from ..gnosis.eth.constants import NULL_ADDRESS
+from ..gnosis.eth.contracts import (get_proxy_factory_contract,
                                   get_proxy_factory_V1_1_1_contract)
 
 from ..models import ProxyFactory, SafeContract

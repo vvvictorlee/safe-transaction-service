@@ -10,9 +10,9 @@ from hexbytes import HexBytes
 from web3.contract import ContractEvent
 from web3.types import EventData
 
-from gnosis.eth import EthereumClient
-from gnosis.eth.constants import NULL_ADDRESS
-from gnosis.eth.contracts import get_safe_contract as get_safe_V1_2_0_contract
+from ..gnosis.eth import EthereumClient
+from ..gnosis.eth.constants import NULL_ADDRESS
+from ..gnosis.eth.contracts import get_safe_contract as get_safe_V1_2_0_contract
 
 from ..models import (EthereumTxCallType, InternalTx, InternalTxDecoded,
                       InternalTxType, SafeL2MasterCopy)

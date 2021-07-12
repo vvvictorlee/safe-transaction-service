@@ -5,7 +5,7 @@ from django.db import IntegrityError, transaction
 
 from hexbytes import HexBytes
 
-from gnosis.eth import EthereumClient, EthereumClientProvider
+from ..gnosis.eth import EthereumClient, EthereumClientProvider
 
 from ..models import (EthereumBlock, EthereumTx, InternalTxDecoded,
                       ModuleTransaction, MultisigConfirmation,

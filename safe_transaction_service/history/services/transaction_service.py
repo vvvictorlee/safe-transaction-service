@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from redis import Redis
 
-from gnosis.eth import EthereumClient, EthereumClientProvider
+from ..gnosis.eth import EthereumClient, EthereumClientProvider
 from gnosis.eth.django.models import Uint256Field
 
 from safe_transaction_service.tokens.models import Token
