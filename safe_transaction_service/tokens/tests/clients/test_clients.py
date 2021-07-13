@@ -11,7 +11,7 @@ class TestClients(TestCase):
         just_test_if_mainnet_node()
         kraken_client = KrakenClient()
 
-        # Binance is used
+        # HSC is used
         price = kraken_client.get_dai_usd_price()
         self.assertIsInstance(price, float)
         self.assertGreater(price, 0)
@@ -38,7 +38,7 @@ class TestClients(TestCase):
         just_test_if_mainnet_node()
         binance_client = BinanceClient()
 
-        # Binance is used
+        # HSC is used
         eth_usd_price = binance_client.get_eth_usd_price()
         self.assertIsInstance(eth_usd_price, float)
         self.assertGreater(eth_usd_price, 0)

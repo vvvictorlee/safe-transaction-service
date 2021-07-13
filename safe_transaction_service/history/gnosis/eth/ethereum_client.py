@@ -613,7 +613,8 @@ class ParityManager:
         self.w3 = ethereum_client.w3
         self.slow_w3 = Web3(self.ethereum_client.get_slow_provider(timeout=slow_provider_timeout))
         self.ethereum_node_url = ethereum_client.ethereum_node_url
-        self.ethereum_node_url2='http://host.docker.internal:10000'
+        from django.conf import settings
+        self.ethereum_node_url2=settings.ETHEREUM_NODE_URL2
     # TODO Test with mock
     def _decode_trace_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         decoded = {

@@ -35,7 +35,7 @@ class TestPriceService(TestCase):
         eth_usd_price = price_service.get_eth_usd_price()
         self.assertEqual(eth_usd_price, kraken_mock.return_value)
 
-        # Remove cache and test binance is called
+        # Remove cache and test hsc is called
         price_service.cache_eth_price.clear()
         eth_usd_price = price_service.get_eth_usd_price()
         binance_mock.called_once()
