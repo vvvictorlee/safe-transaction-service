@@ -15,6 +15,7 @@ ALLOWED_HOSTS = [
     "0.0.0.0",
     "127.0.0.1",
 "172.31.23.16",
+"safe-transaction.hoosmartchain.com",
 "172.31.22.80",
 "safe-transaction-app.hoosmartchain.com"
 ]
