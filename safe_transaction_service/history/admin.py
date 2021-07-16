@@ -11,8 +11,8 @@ from gnosis.eth import EthereumClientProvider
 from .models import (EthereumBlock, EthereumEvent, EthereumTx, InternalTx,
                      InternalTxDecoded, ModuleTransaction,
                      MultisigConfirmation, MultisigTransaction, ProxyFactory,
-                     SafeContract, SafeContractDelegate, SafeL2MasterCopy,
-                     SafeMasterCopy, SafeStatus, WebHook)
+                     SafeContract, SafeContractDelegate, SafeMasterCopy,
+                     SafeStatus, WebHook)
 from .services import IndexServiceProvider
 
 
@@ -95,13 +95,15 @@ class EthereumEventAdmin(admin.ModelAdmin):
     def to(self, obj: EthereumEvent):
         return obj.arguments.get('to')
 
-    @admin.display(boolean=True)
     def erc20(self, obj: EthereumEvent):
         return obj.is_erc20()
 
-    @admin.display(boolean=True)
     def erc721(self, obj: EthereumEvent):
         return obj.is_erc721()
+
+    # Fancy icons
+    erc20.boolean = True
+    erc721.boolean = True
 
 
 @admin.register(EthereumTx)
@@ -154,7 +156,7 @@ class InternalTxDecodedAdmin(admin.ModelAdmin):
                 '-internal_tx__trace_address']
     raw_id_fields = ('internal_tx',)
     search_fields = ['function_name', 'arguments', '=internal_tx__to', '=internal_tx___from',
-                     '=internal_tx__ethereum_tx__tx_hash', '=internal_tx__ethereum_tx__block__number']
+                     '=internal_tx__ethereum_tx__tx_hash']
 
     def process_again(self, request, queryset):
         queryset.filter(processed=True).update(processed=False)
@@ -188,9 +190,9 @@ class MultisigConfirmationAdmin(admin.ModelAdmin):
     raw_id_fields = ('ethereum_tx', 'multisig_transaction')
     search_fields = ['=multisig_transaction__safe', '=ethereum_tx__tx_hash', '=multisig_transaction_hash', '=owner']
 
-    @admin.display(boolean=True)
     def has_multisig_tx(self, obj: MultisigConfirmation) -> bool:
         return bool(obj.multisig_transaction_id)
+    has_multisig_tx.boolean = True
 
     def block_number(self, obj: MultisigConfirmation) -> Optional[int]:
         if obj.ethereum_tx:
@@ -224,15 +226,15 @@ class MultisigTransactionAdmin(admin.ModelAdmin):
     list_select_related = ('ethereum_tx',)
     ordering = ['-created']
     raw_id_fields = ('ethereum_tx',)
-    search_fields = ['=ethereum_tx__tx_hash', '=safe', 'to', 'safe_tx_hash']
+    search_fields = ['=ethereum_tx__tx_hash', '=safe', 'to']
 
-    @admin.display(boolean=True)
     def executed(self, obj: MultisigTransaction):
         return obj.executed
+    executed.boolean = True
 
-    @admin.display(boolean=True)
     def successful(self, obj: MultisigTransaction):
         return not obj.failed
+    successful.boolean = True
 
 
 @admin.register(ModuleTransaction)
@@ -265,27 +267,21 @@ class MonitoredAddressAdmin(admin.ModelAdmin):
     reindex.short_description = "Reindex from initial block"
 
     def reindex_last_day(self, request, queryset):
-        queryset.update(tx_block_number=Greatest(F('tx_block_number') - 6000, F('initial_block_number')))
+        queryset.update(tx_block_number=Greatest(F('tx_block_number') - 6000, 0))
     reindex_last_day.short_description = "Reindex last 24 hours"
 
     def reindex_last_week(self, request, queryset):
-        queryset.update(tx_block_number=Greatest(F('tx_block_number') - 42000, F('initial_block_number')))
+        queryset.update(tx_block_number=Greatest(F('tx_block_number') - 42000, 0))
     reindex_last_week.short_description = "Reindex last week"
 
     def reindex_last_month(self, request, queryset):
-        queryset.update(tx_block_number=Greatest(F('tx_block_number') - 200000, F('initial_block_number')))
+        queryset.update(tx_block_number=Greatest(F('tx_block_number') - 200000, 0))
     reindex_last_month.short_description = "Reindex last month"
 
 
 @admin.register(SafeMasterCopy)
 class SafeMasterCopyAdmin(MonitoredAddressAdmin):
-    list_display = ('address', 'initial_block_number', 'tx_block_number', 'version', 'deployer')
-    list_filter = ('deployer',)
-
-
-@admin.register(SafeL2MasterCopy)
-class SafeMasterCopyAdmin(SafeMasterCopyAdmin):
-    pass
+    list_display = ('address', 'initial_block_number', 'tx_block_number', 'version')
 
 
 @admin.register(ProxyFactory)
@@ -377,8 +373,8 @@ class SafeStatusAdmin(admin.ModelAdmin):
     readonly_fields = ('function_name', 'arguments')
     list_display = ('block_number', 'internal_tx_id', 'function_name',
                     'address', 'owners', 'threshold', 'nonce', 'master_copy',
-                    'fallback_handler', 'guard', 'enabled_modules')
-    list_filter = ('threshold', 'master_copy', 'fallback_handler', 'guard', SafeStatusModulesListFilter)
+                    'fallback_handler', 'enabled_modules')
+    list_filter = ('threshold', 'master_copy', 'fallback_handler', SafeStatusModulesListFilter)
     list_select_related = ('internal_tx__ethereum_tx', 'internal_tx__decoded_tx')
     ordering = ['-internal_tx__ethereum_tx__block_id', '-internal_tx_id']
     raw_id_fields = ('internal_tx',)
@@ -395,17 +391,16 @@ class SafeStatusAdmin(admin.ModelAdmin):
         return False
 
     def remove_and_index(self, request, queryset):
-        safe_addresses = list(queryset.distinct().values_list('address', flat=True))
+        safe_addresses = queryset.distinct().values('address')
         IndexServiceProvider().reindex_addresses(safe_addresses)
-    remove_and_index.short_description = "Remove and process transactions again"
+    remove_and_index.short_description = "Remove and index again"
 
 
 @admin.register(WebHook)
 class WebHookAdmin(admin.ModelAdmin):
     list_display = ('address', 'url', 'pending_outgoing_transaction', 'new_confirmation',
-                    'new_executed_outgoing_transaction', 'new_incoming_transaction', 'new_safe',
-                    'new_module_transaction', 'new_outgoing_transaction')
+                    'new_executed_outgoing_transaction', 'new_incoming_transaction')
     list_filter = ('pending_outgoing_transaction', 'new_confirmation', 'new_executed_outgoing_transaction',
-                   'new_incoming_transaction', 'new_safe', 'new_module_transaction', 'new_outgoing_transaction')
+                   'new_incoming_transaction')
     ordering = ['-pk']
     search_fields = ['address', 'url']

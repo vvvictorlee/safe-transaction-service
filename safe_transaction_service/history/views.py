@@ -1,5 +1,4 @@
 import hashlib
-import logging
 from typing import Tuple
 
 from django.conf import settings
@@ -12,32 +11,26 @@ from drf_yasg import openapi
 from drf_yasg.utils import swagger_auto_schema
 from rest_framework import status
 from rest_framework.filters import OrderingFilter
-from rest_framework.generics import (DestroyAPIView, GenericAPIView,
-                                     ListAPIView, ListCreateAPIView,
-                                     RetrieveAPIView, get_object_or_404)
+from rest_framework.generics import (DestroyAPIView, ListAPIView,
+                                     ListCreateAPIView, RetrieveAPIView,
+                                     get_object_or_404)
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from web3 import Web3
 
-from gnosis.eth.constants import NULL_ADDRESS
-from gnosis.safe import CannotEstimateGas
-
-from safe_transaction_service import __version__
 from safe_transaction_service.tokens.models import Token
-from safe_transaction_service.utils.utils import parse_boolean_query_param
+from safe_transaction_service.version import __version__
 
 from . import filters, pagination, serializers
 from .models import (InternalTx, ModuleTransaction, MultisigConfirmation,
                      MultisigTransaction, SafeContract, SafeContractDelegate,
                      SafeMasterCopy, SafeStatus, TransferDict)
-from .serializers import get_data_decoded_from_data
 from .services import (BalanceServiceProvider, SafeServiceProvider,
                        TransactionServiceProvider)
 from .services.collectibles_service import CollectiblesServiceProvider
 from .services.safe_service import CannotGetSafeInfo
-
-logger = logging.getLogger(__name__)
+from .utils import parse_boolean_query_param
 
 
 class AboutView(APIView):
@@ -46,7 +39,6 @@ class AboutView(APIView):
     """
     renderer_classes = (JSONRenderer,)
 
-    @method_decorator(cache_page(60 * 60))  # Cache 1 hour
     def get(self, request, format=None):
         content = {
             'name': 'Safe Transaction Service',
@@ -55,15 +47,14 @@ class AboutView(APIView):
             'secure': self.request.is_secure(),
             'settings': {
                 'AWS_CONFIGURED': settings.AWS_CONFIGURED,
-                'AWS_S3_BUCKET_NAME': settings.AWS_S3_BUCKET_NAME,
-                'AWS_S3_PUBLIC_URL': settings.AWS_S3_PUBLIC_URL,
+                'AWS_S3_CUSTOM_DOMAIN': settings.AWS_S3_CUSTOM_DOMAIN,
                 'ETHEREUM_NODE_URL': settings.ETHEREUM_NODE_URL,
                 'ETHEREUM_TRACING_NODE_URL': settings.ETHEREUM_TRACING_NODE_URL,
-                'ETH_INTERNAL_NO_FILTER': settings.ETH_INTERNAL_NO_FILTER,
                 'ETH_INTERNAL_TXS_BLOCK_PROCESS_LIMIT': settings.ETH_INTERNAL_TXS_BLOCK_PROCESS_LIMIT,
-                'ETH_L2_NETWORK': settings.ETH_L2_NETWORK,
+                'ETH_INTERNAL_NO_FILTER': settings.ETH_INTERNAL_NO_FILTER,
                 'ETH_REORG_BLOCKS': settings.ETH_REORG_BLOCKS,
-                'NOTIFICATIONS_FIREBASE_CREDENTIALS_PATH': settings.NOTIFICATIONS_FIREBASE_CREDENTIALS_PATH,
+                'ETH_UNISWAP_FACTORY_ADDRESS': settings.ETH_UNISWAP_FACTORY_ADDRESS,
+                'ETH_KYBER_NETWORK_PROXY_ADDRESS': settings.ETH_KYBER_NETWORK_PROXY_ADDRESS,
                 'TOKENS_LOGO_BASE_URI': settings.TOKENS_LOGO_BASE_URI,
                 'TOKENS_LOGO_EXTENSION': settings.TOKENS_LOGO_EXTENSION,
             }
@@ -89,10 +80,10 @@ class AnalyticsMultisigTxsBySafeListView(ListAPIView):
 class AllTransactionsListView(ListAPIView):
     filter_backends = (django_filters.rest_framework.DjangoFilterBackend, OrderingFilter)
     pagination_class = pagination.SmallPagination
-    serializer_class = serializers.AllTransactionsSchemaSerializer  # Just for docs, not used
+    serializer_class = serializers._AllTransactionsSchemaSerializer  # Just for docs, not used
 
-    _schema_executed_param = openapi.Parameter('executed', openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=False,
-                                               description='If `True` only executed transactions are returned')
+    _schema_queued_param = openapi.Parameter('executed', openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=False,
+                                             description='If `True` only executed transactions are returned')
     _schema_queued_param = openapi.Parameter('queued', openapi.IN_QUERY, type=openapi.TYPE_BOOLEAN, default=True,
                                              description='If `True` transactions with `nonce >= Safe current nonce` '
                                                          'are also returned')
@@ -100,7 +91,7 @@ class AllTransactionsListView(ListAPIView):
                                               description='If `True` just trusted transactions are shown (indexed, '
                                                           'added by a delegate or with at least one confirmation)')
     _schema_200_response = openapi.Response('A list with every element with the structure of one of these transaction'
-                                            'types', serializers.AllTransactionsSchemaSerializer)
+                                            'types', serializers._AllTransactionsSchemaSerializer)
 
     def get_parameters(self) -> Tuple[bool, bool, bool]:
         """
@@ -133,7 +124,7 @@ class AllTransactionsListView(ListAPIView):
 
     @swagger_auto_schema(responses={200: _schema_200_response,
                                     422: 'code = 1: Checksum address validation failed'},
-                         manual_parameters=[_schema_executed_param, _schema_queued_param, _schema_trusted_param])
+                         manual_parameters=[_schema_queued_param, _schema_trusted_param])
     def get(self, request, *args, **kwargs):
         """
         Returns a paginated list of transactions for a Safe. The list has different structures depending on the
@@ -147,10 +138,9 @@ class AllTransactionsListView(ListAPIView):
         """
         address = kwargs['address']
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data={'code': 1,
+                                                                               'message': 'Checksum address validation failed',
+                                                                               'arguments': [address]})
 
         response = super().get(request, *args, **kwargs)
         response.setdefault('ETag', 'W/' + hashlib.md5(str(response.data['results']).encode()).hexdigest())
@@ -180,10 +170,7 @@ class SafeModuleTransactionListView(ListAPIView):
         Returns the module transaction of a Safe
         """
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data='Invalid ethereum address')
 
         response = super().get(request, address)
         response.setdefault('ETag', 'W/' + hashlib.md5(str(response.data['results']).encode()).hexdigest())
@@ -244,7 +231,7 @@ class SafeMultisigTransactionDetailView(RetrieveAPIView):
 class SafeMultisigTransactionListView(ListAPIView):
     filter_backends = (django_filters.rest_framework.DjangoFilterBackend, OrderingFilter)
     filterset_class = filters.MultisigTransactionFilter
-    ordering_fields = ['nonce', 'created', 'modified']
+    ordering_fields = ['nonce', 'created']
     pagination_class = pagination.DefaultPagination
 
     def get_queryset(self):
@@ -280,10 +267,7 @@ class SafeMultisigTransactionListView(ListAPIView):
         """
         address = kwargs['address']
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data='Invalid ethereum address')
 
         response = super().get(request, *args, **kwargs)
         response.data['count_unique_nonce'] = self.get_unique_nonce(address) if response.data['count'] else 0
@@ -299,13 +283,10 @@ class SafeMultisigTransactionListView(ListAPIView):
         Creates a Multisig Transaction with its confirmations and retrieves all the information related.
         """
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data='Invalid ethereum address')
 
         request.data['safe'] = address
-        serializer = self.get_serializer(data=request.data)
+        serializer = self.get_serializer_class()(data=request.data)
 
         if not serializer.is_valid():
             return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data=serializer.errors)
@@ -417,10 +398,7 @@ class SafeDelegateListView(ListCreateAPIView):
         Get the list of delegates for a Safe address
         """
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data='Invalid ethereum address')
 
         return super().get(request, address, **kwargs)
 
@@ -440,10 +418,7 @@ class SafeDelegateListView(ListCreateAPIView):
              - The hash to sign by a Safe owner would be `keccak("0x132512f995866CcE1b0092384A6118EDaF4508Ff440771")`
         """
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data='Invalid ethereum address')
 
         request.data['safe'] = address
         return super().post(request, address, **kwargs)
@@ -457,22 +432,17 @@ class SafeDelegateDestroyView(DestroyAPIView):
                                  safe_contract_id=self.kwargs['address'],
                                  delegate=self.kwargs['delegate_address'])
 
-    @swagger_auto_schema(
-        request_body=serializer_class(),
-        responses={204: 'Deleted',
-                   400: 'Malformed data',
-                   404: 'Delegate not found',
-                   422: 'Invalid Ethereum address/Error processing data'})
+    @swagger_auto_schema(responses={204: 'Deleted',
+                                    400: 'Malformed data',
+                                    404: 'Delegate not found',
+                                    422: 'Invalid Ethereum address/Error processing data'})
     def delete(self, request, address, delegate_address, *args, **kwargs):
         """
         Delete a delegate for a Safe. Signature is built the same way that for adding a delegate.
         Check `POST /delegates/`
         """
         if not Web3.isChecksumAddress(address) or not Web3.isChecksumAddress(delegate_address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address, delegate_address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data='Invalid ethereum address')
 
         request.data['safe'] = address
         request.data['delegate'] = delegate_address
@@ -524,11 +494,7 @@ class SafeTransferListView(ListAPIView):
         Returns the history of a multisig tx (safe)
         """
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]}
-                            )
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data='Invalid ethereum address')
 
         response = super().get(request, address)
         response.setdefault('ETag', 'W/' + hashlib.md5(str(response.data['results']).encode()).hexdigest())
@@ -554,19 +520,18 @@ class SafeCreationView(APIView):
         """
         Get status of the safe
         """
-
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
-        safe_creation_info = SafeServiceProvider().get_safe_creation_info(address)
-        if not safe_creation_info:
-            return Response(status=status.HTTP_404_NOT_FOUND)
+        try:
+            safe_creation_info = SafeServiceProvider().get_safe_creation_info(address)
+            if not safe_creation_info:
+                return Response(status=status.HTTP_404_NOT_FOUND)
 
-        serializer = self.serializer_class(safe_creation_info)
-        return Response(status=status.HTTP_200_OK, data=serializer.data)
+            serializer = self.serializer_class(safe_creation_info)
+            return Response(status=status.HTTP_200_OK, data=serializer.data)
+        except IOError:
+            return Response(status=status.HTTP_503_SERVICE_UNAVAILABLE, data='Problem connecting to Ethereum network')
 
 
 class SafeInfoView(APIView):
@@ -580,10 +545,9 @@ class SafeInfoView(APIView):
         Get status of the safe
         """
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data={'code': 1,
+                                                                               'message': 'Checksum address validation failed',
+                                                                               'arguments': [address]})
 
         if not SafeContract.objects.filter(address=address).exists():
             return Response(status=status.HTTP_404_NOT_FOUND)
@@ -614,90 +578,9 @@ class OwnersView(APIView):
         Return Safes where the address provided is an owner
         """
         if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
+            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY)
 
         safes_for_owner = SafeStatus.objects.addresses_for_owner(address)
         serializer = self.serializer_class(data={'safes': safes_for_owner})
         assert serializer.is_valid()
         return Response(status=status.HTTP_200_OK, data=serializer.data)
-
-
-class OwnersDeprecatedView(OwnersView):
-    @swagger_auto_schema(deprecated=True,
-                         responses={200: serializers.OwnerResponseSerializer(),
-                                    422: 'Owner address checksum not valid'})
-    def get(self, *args, **kwargs):
-        return super().get(*args, **kwargs)
-
-
-class DataDecoderView(GenericAPIView):
-    def get_serializer_class(self):
-        return serializers.DataDecoderSerializer
-
-    @swagger_auto_schema(responses={200: 'Decoded data',
-                                    404: 'Cannot find function selector to decode data',
-                                    422: 'Invalid data'})
-    def post(self, request, format=None):
-        """
-        Creates a Multisig Transaction with its confirmations and retrieves all the information related.
-        """
-
-        serializer = self.get_serializer(data=request.data)
-
-        if not serializer.is_valid():
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY, data=serializer.errors)
-        else:
-            data_decoded = get_data_decoded_from_data(serializer.data['data'])
-            if data_decoded:
-                return Response(status=status.HTTP_200_OK, data=data_decoded)
-            else:
-                return Response(status=status.HTTP_404_NOT_FOUND, data=data_decoded)
-
-
-class SafeMultisigTransactionEstimateView(GenericAPIView):
-    serializer_class = serializers.SafeMultisigTransactionEstimateSerializer
-    response_serializer = serializers.SafeMultisigTransactionEstimateResponseSerializer
-
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
-        if getattr(self, 'swagger_fake_view', False):
-            # Just for schema generation metadata
-            context['safe_address'] = NULL_ADDRESS
-        else:
-            context['safe_address'] = self.kwargs['address']
-        return context
-
-    @swagger_auto_schema(responses={200: response_serializer,
-                                    400: 'Data not valid',
-                                    404: 'Safe not found',
-                                    422: 'Tx not valid'})
-    def post(self, request, address, *args, **kwargs):
-        """
-        Estimates `safeTxGas` for a Safe Multisig Transaction.
-        """
-        if not Web3.isChecksumAddress(address):
-            return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            data={'code': 1,
-                                  'message': 'Checksum address validation failed',
-                                  'arguments': [address]})
-
-        if not SafeContract.objects.filter(address=address).exists():
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-        serializer = self.get_serializer(data=request.data)
-        if serializer.is_valid():
-            try:
-                response_serializer = self.response_serializer(data=serializer.save())
-                response_serializer.is_valid(raise_exception=True)
-                return Response(status=status.HTTP_200_OK, data=response_serializer.data)
-            except CannotEstimateGas as exc:
-                logger.warning('Cannot estimate gas for safe=%s data=%s', address, serializer.validated_data)
-                return Response(status=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                                data={'code': 30,
-                                      'message': 'Gas estimation failed',
-                                      'arguments': [str(exc)]})
-        else:
-            return Response(status=status.HTTP_400_BAD_REQUEST, data=serializer.errors)

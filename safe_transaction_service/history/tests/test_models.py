@@ -1,6 +1,5 @@
 import logging
 
-from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.db.models import QuerySet
 from django.test import TestCase
@@ -10,8 +9,7 @@ from web3 import Web3
 
 from gnosis.safe.safe_signature import SafeSignatureType
 
-from safe_transaction_service.contracts.tests.factories import ContractFactory
-
+from ...contracts.tests.factories import ContractFactory
 from ..models import (EthereumEvent, EthereumTxCallType, InternalTx,
                       InternalTxDecoded, MultisigConfirmation,
                       MultisigTransaction, SafeContractDelegate,
@@ -21,7 +19,7 @@ from .factories import (EthereumBlockFactory, EthereumEventFactory,
                         InternalTxFactory, MultisigConfirmationFactory,
                         MultisigTransactionFactory,
                         SafeContractDelegateFactory, SafeContractFactory,
-                        SafeMasterCopyFactory, SafeStatusFactory)
+                        SafeStatusFactory)
 
 logger = logging.getLogger(__name__)
 
@@ -92,41 +90,6 @@ class TestModelMixins(TestCase):
         self.assertEqual(InternalTx.objects.bulk_create_from_generator(another_generator, batch_size=2), number)
 
 
-class TestMultisigTransaction(TestCase):
-    def test_multisig_transaction_owners(self):
-        multisig_transaction = MultisigTransactionFactory(signatures=None)
-        self.assertEqual(multisig_transaction.owners, [])
-
-        account = Account.create()
-        multisig_transaction.signatures = account.signHash(multisig_transaction.safe_tx_hash)['signature']
-        multisig_transaction.save()
-        self.assertEqual(multisig_transaction.owners, [account.address])
-
-    def test_queued(self):
-        safe_address = Account.create().address
-        queryset = MultisigTransaction.objects.queued(safe_address)
-        self.assertEqual(queryset.count(), 0)
-        MultisigTransactionFactory(safe=safe_address, nonce=0, ethereum_tx=None)
-        self.assertEqual(queryset.all().count(), 1)
-        MultisigTransactionFactory(safe=safe_address, nonce=0)
-        self.assertEqual(queryset.all().count(), 0)
-        MultisigTransactionFactory(safe=safe_address, nonce=1, ethereum_tx=None)
-        self.assertEqual(queryset.all().count(), 1)
-        MultisigTransactionFactory(safe=safe_address, nonce=2, ethereum_tx=None)
-        self.assertEqual(queryset.all().count(), 2)
-        MultisigTransactionFactory(nonce=10)  # Other Safe, it must not affect
-        self.assertEqual(queryset.all().count(), 2)
-        MultisigTransactionFactory(safe=safe_address, nonce=10)  # Last executed tx
-        self.assertEqual(queryset.all().count(), 0)
-        MultisigTransactionFactory(safe=safe_address, nonce=7, ethereum_tx=None)  # Not queued (7 < 10)
-        MultisigTransactionFactory(safe=safe_address, nonce=22, ethereum_tx=None)  # Queued (22 > 10)
-        MultisigTransactionFactory(safe=safe_address, nonce=22, ethereum_tx=None)  # Queued (22 > 10)
-        MultisigTransactionFactory(safe=safe_address, nonce=57, ethereum_tx=None)  # Queued (22 > 10)
-        self.assertEqual(queryset.all().count(), 3)
-        MultisigTransactionFactory(safe=safe_address, nonce=22)  # only nonce=57 will be queued
-        self.assertEqual(queryset.all().count(), 1)
-
-
 class TestSafeMasterCopy(TestCase):
     def test_safe_master_copy_sorting(self):
         SafeMasterCopy.objects.create(address=Account.create().address,
@@ -145,28 +108,6 @@ class TestSafeMasterCopy(TestCase):
                                  for safe_master_copy in SafeMasterCopy.objects.all()]
 
         self.assertEqual(initial_block_numbers, [2, 6, 3])
-
-    def test_get_version_for_address(self):
-        random_address = Account.create().address
-        self.assertIsNone(SafeMasterCopy.custom_manager.get_version_for_address(random_address))
-
-        safe_master_copy = SafeMasterCopyFactory(address=random_address)
-        self.assertTrue(safe_master_copy.version)
-        self.assertEqual(SafeMasterCopy.custom_manager.get_version_for_address(random_address),
-                         safe_master_copy.version)
-
-    def test_validate_version(self):
-        safe_master_copy = SafeMasterCopyFactory()
-        safe_master_copy.version = ''
-        with self.assertRaisesMessage(ValidationError, 'cannot be blank'):
-            safe_master_copy.full_clean()
-
-        safe_master_copy.version = 'not_a_version'
-        with self.assertRaisesMessage(ValidationError, 'is not a valid version'):
-            safe_master_copy.full_clean()
-
-        safe_master_copy.version = '2.0.1'
-        self.assertIsNone(safe_master_copy.full_clean())
 
 
 class TestEthereumTx(TestCase):
@@ -308,20 +249,6 @@ class TestInternalTx(TestCase):
         InternalTx.objects.bulk_create(internal_txs[:3])
         with self.assertRaises(IntegrityError):
             InternalTx.objects.bulk_create(internal_txs)  # Cannot bulk create again first 2 transactions
-
-    def test_get_parent_child(self):
-        i = InternalTxFactory(trace_address='0')
-        self.assertIsNone(i.get_parent())
-        i_2 = InternalTxFactory(trace_address='0,0')
-        self.assertIsNone(i_2.get_parent())  # They must belong to the same ethereum transaction
-        self.assertIsNone(i.get_child(0))  # They must belong to the same ethereum transaction
-        i_2.ethereum_tx = i.ethereum_tx
-        i_2.save()
-
-        self.assertEqual(i_2.get_parent(), i)
-        self.assertEqual(i.get_child(0), i_2)
-        self.assertIsNone(i.get_child(1))
-        self.assertIsNone(i_2.get_child(0))
 
 
 class TestInternalTxDecoded(TestCase):

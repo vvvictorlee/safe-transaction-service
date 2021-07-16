@@ -7,8 +7,8 @@ from celery.utils.log import get_task_logger
 from safe_transaction_service.history.models import (MultisigConfirmation,
                                                      MultisigTransaction,
                                                      SafeStatus, WebHookType)
-from safe_transaction_service.utils.redis import get_redis
-from safe_transaction_service.utils.utils import close_gevent_db_connection
+from safe_transaction_service.history.utils import (close_gevent_db_connection,
+                                                    get_redis)
 
 from .clients.firebase_client import FirebaseClientPool
 from .models import FirebaseDevice, FirebaseDeviceOwner
@@ -60,8 +60,6 @@ def filter_notification(payload: Dict[str, Any]) -> bool:
         #    pass
 
         # All confirmations are disabled for now
-        return False
-    elif payload_type in (WebHookType.OUTGOING_ETHER.name, WebHookType.OUTGOING_TOKEN.name):
         return False
     elif payload_type in (WebHookType.INCOMING_ETHER.name, WebHookType.INCOMING_TOKEN.name):
         # Only send ETH/token pushes when they weren't triggered by a tx from some account other than the Safe.
@@ -115,7 +113,7 @@ def send_notification_task(address: Optional[str], payload: Dict[str, Any]) -> T
             logger.info('Sending notification about Safe=%s with payload=%s to tokens=%s', address, payload, tokens)
             success_count, failure_count, invalid_tokens = firebase_client.send_message(tokens, payload)
             if invalid_tokens:
-                logger.info('Removing invalid tokens for safe=%s. Tokens=%s', address, invalid_tokens)
+                logger.info('Removing invalid tokens for safe=%s', address)
                 FirebaseDevice.objects.filter(
                     cloud_messaging_token__in=invalid_tokens
                 ).update(cloud_messaging_token=None)
@@ -136,19 +134,13 @@ def send_notification_owner_task(address: str, safe_tx_hash: str):
     assert safe_tx_hash, 'Safe tx hash was not provided'
 
     try:
-        safe_status = SafeStatus.objects.last_for_address(address)
-
-        if not safe_status:
-            logger.info('Cannot find threshold information for safe=%s', address)
-            return 0, 0
-
-        if safe_status.threshold == 1:
-            logger.info('No need to send confirmation notification for safe=%s with threshold=1', address)
-            return 0, 0
-
         confirmed_owners = MultisigConfirmation.objects.filter(
             multisig_transaction_id=safe_tx_hash
         ).values_list('owner', flat=True)
+        safe_status = SafeStatus.objects.last_for_address(address)
+        if not safe_status:
+            logger.info('Cannot find threshold information for safe=%s', address)
+            return 0, 0
 
         if safe_status.threshold <= len(confirmed_owners):
             # No need for more confirmations
@@ -158,10 +150,9 @@ def send_notification_owner_task(address: str, safe_tx_hash: str):
 
         # Get cloud messaging token for missing owners
         owners_to_notify = set(safe_status.owners) - set(confirmed_owners)
-        if not owners_to_notify:
-            return 0, 0
-
-        tokens = FirebaseDeviceOwner.objects.get_devices_for_safe_and_owners(address, owners_to_notify)
+        tokens = list(FirebaseDeviceOwner.objects.filter(
+            owner__in=owners_to_notify
+        ).values_list('firebase_device__cloud_messaging_token', flat=True))
 
         if not tokens:
             logger.info('No cloud messaging tokens found for needed owners %s to sign safe-tx-hash=%s for safe=%s',
@@ -185,7 +176,7 @@ def send_notification_owner_task(address: str, safe_tx_hash: str):
             logger.info('Sending notification about Safe=%s with payload=%s to tokens=%s', address, payload, tokens)
             success_count, failure_count, invalid_tokens = firebase_client.send_message(tokens, payload)
             if invalid_tokens:
-                logger.info('Removing invalid tokens for owners of safe=%s. Tokens=%s', address, invalid_tokens)
+                logger.info('Removing invalid tokens for safe=%s', address)
                 FirebaseDevice.objects.filter(
                     cloud_messaging_token__in=invalid_tokens
                 ).update(cloud_messaging_token=None)

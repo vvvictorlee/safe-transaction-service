@@ -33,29 +33,10 @@ class HasAbiFilter(admin.SimpleListFilter):
             return queryset
 
 
-class HasLogoFilter(admin.SimpleListFilter):
-    title = 'Has Logo'
-    parameter_name = 'has_logo'
-
-    def lookups(self, request, model_admin):
-        return (
-            ('YES', 'Yes'),
-            ('NO', 'No'),
-        )
-
-    def queryset(self, request, queryset):
-        if self.value() == 'NO':
-            return queryset.without_logo()
-        elif self.value() == 'YES':
-            return queryset.with_logo()
-        else:
-            return queryset
-
-
 @admin.register(Contract)
 class ContractAdmin(admin.ModelAdmin):
-    list_display = ('address', 'name', 'display_name', 'has_abi', 'has_logo', 'abi_relevance', 'contract_abi_id')
-    list_filter = (HasAbiFilter, HasLogoFilter)
+    list_display = ('address', 'name', 'display_name', 'has_abi', 'abi_relevance', 'contract_abi_id')
+    list_filter = (HasAbiFilter,)
     list_select_related = ('contract_abi',)
     ordering = ['address']
     raw_id_fields = ('contract_abi',)
@@ -65,10 +46,6 @@ class ContractAdmin(admin.ModelAdmin):
         if obj.contract_abi_id:
             return obj.contract_abi.relevance
 
-    @admin.display(boolean=True)
     def has_abi(self, obj: Contract) -> bool:
         return obj.contract_abi_id is not None
-
-    @admin.display(boolean=True)
-    def has_logo(self, obj: Contract) -> bool:
-        return bool(obj.logo)
+    has_abi.boolean = True

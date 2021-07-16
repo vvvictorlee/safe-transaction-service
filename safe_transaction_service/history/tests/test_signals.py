@@ -5,8 +5,6 @@ from django.test import TestCase
 
 import factory
 
-from gnosis.eth import EthereumNetwork
-
 from ..models import (EthereumEvent, InternalTx, MultisigConfirmation,
                       MultisigTransaction, WebHookType)
 from ..signals import build_webhook_payload, is_valid_webhook
@@ -18,30 +16,17 @@ from .factories import (EthereumEventFactory, InternalTxFactory,
 class TestSignals(TestCase):
     @factory.django.mute_signals(post_save)
     def test_build_webhook_payload(self):
-        self.assertEqual(
-            [payload['type'] for payload in build_webhook_payload(EthereumEvent, EthereumEventFactory())],
-            [WebHookType.INCOMING_TOKEN.name, WebHookType.OUTGOING_TOKEN.name]
-        )
-        self.assertEqual(
-            [payload['type'] for payload in build_webhook_payload(InternalTx, InternalTxFactory())],
-            [WebHookType.INCOMING_ETHER.name, WebHookType.OUTGOING_ETHER.name]
-        )
-        self.assertEqual(
-            [payload['chainId'] for payload in build_webhook_payload(EthereumEvent, EthereumEventFactory())],
-            [EthereumNetwork.GANACHE.value, EthereumNetwork.GANACHE.value]
-        )
-
-        payload = build_webhook_payload(MultisigConfirmation, MultisigConfirmationFactory())[0]
-        self.assertEqual(payload['type'], WebHookType.NEW_CONFIRMATION.name)
-        self.assertEqual(payload['chainId'], EthereumNetwork.GANACHE.value)
-
-        payload = build_webhook_payload(MultisigTransaction, MultisigTransactionFactory())[0]
-        self.assertEqual(payload['type'], WebHookType.EXECUTED_MULTISIG_TRANSACTION.name)
-        self.assertEqual(payload['chainId'], EthereumNetwork.GANACHE.value)
-
-        payload = build_webhook_payload(MultisigTransaction, MultisigTransactionFactory(ethereum_tx=None))[0]
-        self.assertEqual(payload['type'], WebHookType.PENDING_MULTISIG_TRANSACTION.name)
-        self.assertEqual(payload['chainId'], EthereumNetwork.GANACHE.value)
+        self.assertEqual(build_webhook_payload(EthereumEvent, EthereumEventFactory())['type'],
+                         WebHookType.INCOMING_TOKEN.name)
+        self.assertEqual(build_webhook_payload(InternalTx, InternalTxFactory())['type'],
+                         WebHookType.INCOMING_ETHER.name)
+        self.assertEqual(build_webhook_payload(MultisigConfirmation, MultisigConfirmationFactory())['type'],
+                         WebHookType.NEW_CONFIRMATION.name)
+        self.assertEqual(build_webhook_payload(MultisigTransaction, MultisigTransactionFactory())['type'],
+                         WebHookType.EXECUTED_MULTISIG_TRANSACTION.name)
+        self.assertEqual(build_webhook_payload(MultisigTransaction,
+                                               MultisigTransactionFactory(ethereum_tx=None))['type'],
+                         WebHookType.PENDING_MULTISIG_TRANSACTION.name)
 
     @factory.django.mute_signals(post_save)
     def test_is_valid_webhook(self):

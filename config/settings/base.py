@@ -2,13 +2,11 @@
 Base settings to build other settings files upon.
 """
 
-from pathlib import Path
-
 import environ
 from corsheaders.defaults import default_headers as default_cors_headers
 
-ROOT_DIR = Path(__file__).resolve(strict=True).parent.parent.parent
-APPS_DIR = ROOT_DIR / 'safe_transaction_service'
+ROOT_DIR = environ.Path(__file__) - 3  # (safe_transaction_service/config/settings/base.py - 3 = safe-transaction-service/)
+APPS_DIR = ROOT_DIR.path('safe_transaction_service')
 
 env = environ.Env()
 
@@ -17,7 +15,7 @@ DOT_ENV_FILE = env('DJANGO_DOT_ENV_FILE', default=None)
 if READ_DOT_ENV_FILE or DOT_ENV_FILE:
     DOT_ENV_FILE = DOT_ENV_FILE or '.env'
     # OS environment variables take precedence over variables from .env
-    env.read_env(str(ROOT_DIR / DOT_ENV_FILE))
+    env.read_env(str(ROOT_DIR.path(DOT_ENV_FILE)))
 
 # GENERAL
 # ------------------------------------------------------------------------------
@@ -52,8 +50,6 @@ DATABASES['default']['OPTIONS'] = {
     'REUSE_CONNS': 10
 }
 
-DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-
 # URLS
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#root-urlconf
@@ -78,7 +74,6 @@ THIRD_PARTY_APPS = [
     'corsheaders',
     'rest_framework',
     'drf_yasg',
-    'django_s3_storage',
 ]
 LOCAL_APPS = [
     'safe_transaction_service.contracts.apps.ContractsConfig',
@@ -93,7 +88,7 @@ INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#middleware
 MIDDLEWARE = [
-    'safe_transaction_service.utils.loggers.LoggingMiddleware',
+    'safe_transaction_service.history.utils.LoggingMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -107,13 +102,12 @@ MIDDLEWARE = [
 # STATIC
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#static-root
-STATIC_ROOT = str(ROOT_DIR / "staticfiles")
-
+STATIC_ROOT = env('STATIC_ROOT', default=str(ROOT_DIR('staticfiles')))
 # https://docs.djangoproject.com/en/dev/ref/settings/#static-url
 STATIC_URL = '/static/'
 # https://docs.djangoproject.com/en/dev/ref/contrib/staticfiles/#std:setting-STATICFILES_DIRS
 STATICFILES_DIRS = [
-    str(APPS_DIR / 'static'),
+    str(APPS_DIR.path('static')),
 ]
 # https://docs.djangoproject.com/en/dev/ref/contrib/staticfiles/#staticfiles-finders
 STATICFILES_FINDERS = [
@@ -124,7 +118,7 @@ STATICFILES_FINDERS = [
 # MEDIA
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#media-root
-MEDIA_ROOT = str(APPS_DIR / 'media')
+MEDIA_ROOT = str(APPS_DIR('media'))
 # https://docs.djangoproject.com/en/dev/ref/settings/#media-url
 MEDIA_URL = '/media/'
 
@@ -137,7 +131,7 @@ TEMPLATES = [
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
         # https://docs.djangoproject.com/en/dev/ref/settings/#template-dirs
         'DIRS': [
-            str(APPS_DIR / 'templates'),
+            str(APPS_DIR.path('templates')),
         ],
         'OPTIONS': {
             # https://docs.djangoproject.com/en/dev/ref/settings/#template-debug
@@ -172,7 +166,7 @@ CORS_EXPOSE_HEADERS = ['etag']
 # ------------------------------------------------------------------------------
 # https://docs.djangoproject.com/en/dev/ref/settings/#fixture-dirs
 FIXTURE_DIRS = (
-    str(APPS_DIR / 'fixtures'),
+    str(APPS_DIR.path('fixtures')),
 )
 
 # EMAIL
@@ -183,7 +177,7 @@ EMAIL_BACKEND = env('DJANGO_EMAIL_BACKEND', default='django.core.mail.backends.s
 # ADMIN
 # ------------------------------------------------------------------------------
 # Django Admin URL regex.
-ADMIN_URL = r'admin/'
+ADMIN_URL = r'^admin/'
 # https://docs.djangoproject.com/en/dev/ref/settings/#admins
 ADMINS = [
     ("""Gnosis""", 'dev@gnosis.pm'),
@@ -194,6 +188,7 @@ MANAGERS = ADMINS
 # Celery
 # ------------------------------------------------------------------------------
 INSTALLED_APPS += [
+    'safe_transaction_service.taskapp.celery.CeleryConfig',
     'django_celery_beat',
 ]
 # http://docs.celeryproject.org/en/latest/userguide/configuration.html#std:setting-broker_url
@@ -225,7 +220,6 @@ REST_FRAMEWORK = {
         'djangorestframework_camel_case.parser.CamelCaseJSONParser',
     ),
     'DEFAULT_VERSIONING_CLASS': 'rest_framework.versioning.NamespaceVersioning',
-    'EXCEPTION_HANDLER': 'safe_transaction_service.history.exceptions.custom_exception_handler',
 }
 
 # LOGGING
@@ -244,18 +238,18 @@ LOGGING = {
             '()': 'django.utils.log.RequireDebugFalse'
         },
         'ignore_succeeded_none': {
-            '()': 'safe_transaction_service.utils.celery.IgnoreSucceededNone'
+            '()': 'safe_transaction_service.taskapp.celery.IgnoreSucceededNone'
         },
     },
     'formatters': {
         'short': {
-            'format': '%(asctime)s %(message)s'
+            'format': '%(message)s'
         },
         'verbose': {
             'format': '%(asctime)s [%(levelname)s] [%(processName)s] %(message)s'
         },
         'celery_verbose': {
-            'class': 'safe_transaction_service.utils.celery.PatchedCeleryFormatter',
+            'class': 'safe_transaction_service.taskapp.celery.PatchedCeleryFormatter',
             'format': '%(asctime)s [%(levelname)s] [%(task_id)s/%(task_name)s] %(message)s',
             # 'format': '%(asctime)s [%(levelname)s] [%(processName)s] [%(task_id)s/%(task_name)s] %(message)s'
         },
@@ -336,15 +330,21 @@ REDIS_URL = env('REDIS_URL', default='redis://localhost:6379/0')
 # Ethereum
 # ------------------------------------------------------------------------------
 ETHEREUM_NODE_URL = env('ETHEREUM_NODE_URL', default=None)
+ETHEREUM_NODE_URL2 = env('ETHEREUM_NODE_URL2', default=None)
 ETHEREUM_TRACING_NODE_URL = env('ETHEREUM_TRACING_NODE_URL', default=None)
 ETH_INTERNAL_TXS_BLOCK_PROCESS_LIMIT = env('ETH_INTERNAL_TXS_BLOCK_PROCESS_LIMIT', default=10000)
 ETH_INTERNAL_NO_FILTER = env.bool('ETH_INTERNAL_NO_FILTER', default=False)
-ETH_L2_NETWORK = env.bool('ETH_L2_NETWORK', default=not ETHEREUM_TRACING_NODE_URL)  # Use L2 event indexing
 
 # Safe
 # ------------------------------------------------------------------------------
 # Number of blocks from the current block number needed to consider a transaction valid/stable
 ETH_REORG_BLOCKS = env.int('ETH_REORG_BLOCKS', default=10)
+
+# Oracles
+ETH_UNISWAP_FACTORY_ADDRESS = env('ETH_UNISWAP_FACTORY_ADDRESS',
+                                  default='0xc0a47dFe034B400B47bDaD5FecDa2621de6c4d95')
+ETH_KYBER_NETWORK_PROXY_ADDRESS = env('ETH_KYBER_NETWORK_PROXY_ADDRESS',
+                                      default='0x818E6FECD516Ecc3849DAf6845e3EC868087B755')
 
 # Tokens
 TOKENS_LOGO_BASE_URI = env('TOKENS_LOGO_BASE_URI', default='https://gnosis-safe-token-logos.s3.amazonaws.com/')
@@ -362,13 +362,12 @@ if NOTIFICATIONS_FIREBASE_CREDENTIALS_PATH:
     )
 
 
-# AWS S3 https://github.com/etianen/django-s3-storage
-# AWS_QUERYSTRING_AUTH = False  # Remove query parameter authentication from generated URLs
+# AWS S3 https://django-storages.readthedocs.io/en/latest/backends/amazon-S3.html
 AWS_ACCESS_KEY_ID = env('AWS_ACCESS_KEY_ID', default=None)
-AWS_S3_PUBLIC_URL = env('AWS_S3_PUBLIC_URL', default=None)  # Set custom domain for file urls (like cloudfront)
+AWS_QUERYSTRING_AUTH = False  # Remove query parameter authentication from generated URLs
+AWS_S3_CUSTOM_DOMAIN = env('AWS_S3_CUSTOM_DOMAIN', default=None)  # Set custom domain for file urls (like cloudfront)
 AWS_SECRET_ACCESS_KEY = env('AWS_SECRET_ACCESS_KEY', default=None)
-AWS_S3_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME', default=None)
-AWS_S3_FILE_OVERWRITE = True
-AWS_CONFIGURED = bool(AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and AWS_S3_BUCKET_NAME)
+AWS_STORAGE_BUCKET_NAME = env('AWS_STORAGE_BUCKET_NAME', default=None)
+AWS_CONFIGURED = bool(AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY and AWS_STORAGE_BUCKET_NAME)
 
 ETHERSCAN_API_KEY = env('ETHERSCAN_API_KEY', default=None)

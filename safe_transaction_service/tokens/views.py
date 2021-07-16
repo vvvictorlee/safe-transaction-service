@@ -8,9 +8,11 @@ from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.generics import ListAPIView, RetrieveAPIView
 from web3 import Web3
 
+from safe_transaction_service.history.services import (
+    BalanceServiceProvider, CollectiblesServiceProvider)
+
 from . import filters, serializers
 from .models import Token
-from .tasks import get_token_info_from_blockchain
 
 
 class TokenView(RetrieveAPIView):
@@ -18,7 +20,7 @@ class TokenView(RetrieveAPIView):
     lookup_field = 'address'
     queryset = Token.objects.all()
 
-    @method_decorator(cache_page(60 * 60))  # Cache 1 hour, this should never change
+    @method_decorator(cache_page(60 * 60 * 6))  # Cache 6 hours, this should never change
     def get(self, request, *args, **kwargs):
         address = self.kwargs['address']
         if not Web3.isChecksumAddress(address):
@@ -30,8 +32,13 @@ class TokenView(RetrieveAPIView):
         try:
             return super().get(request, *args, **kwargs)
         except Http404 as exc:  # Try to get info about the token
-            get_token_info_from_blockchain.delay(address)
-            raise exc
+            token_info = (BalanceServiceProvider().get_token_info(address)
+                          or CollectiblesServiceProvider().get_token_info(address))  # TODO Refactor
+            if not token_info:
+                raise exc
+
+            # If token was found it will be added to database, so we try again
+            return super().get(request, *args, **kwargs)
 
 
 class TokensView(ListAPIView):

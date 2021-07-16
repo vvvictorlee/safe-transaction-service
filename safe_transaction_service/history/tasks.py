@@ -1,33 +1,103 @@
 import contextlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 from urllib.parse import urlparse
 
+import gevent
 import requests
 from celery import app
+from celery.app.task import Task as CeleryTask
+from celery.signals import celeryd_init, worker_shutting_down
 from celery.utils.log import get_task_logger
 from redis.exceptions import LockError
 
-from safe_transaction_service.utils.utils import close_gevent_db_connection
+from safe_transaction_service.contracts.tasks import index_contracts_metadata
 
-from ..utils.tasks import LOCK_TIMEOUT, SOFT_TIMEOUT, only_one_running_task
 from .indexers import (Erc20EventsIndexerProvider, InternalTxIndexerProvider,
                        ProxyFactoryIndexerProvider)
-from .indexers.safe_events_indexer import SafeEventsIndexerProvider
 from .indexers.tx_processor import SafeTxProcessor, SafeTxProcessorProvider
-from .models import InternalTxDecoded, SafeStatus, WebHook, WebHookType
+from .models import (InternalTxDecoded, MultisigTransaction, SafeStatus,
+                     WebHook, WebHookType)
 from .services import IndexServiceProvider, ReorgService, ReorgServiceProvider
+from .utils import close_gevent_db_connection, get_redis
 
 logger = get_task_logger(__name__)
 
 
-@app.shared_task(bind=True, soft_time_limit=SOFT_TIMEOUT, autoretry_for=(IOError,),
-                 default_retry_delay=15, retry_kwargs={'max_retries': 3})
+COUNTDOWN = 60  # seconds
+LOCK_TIMEOUT = 60 * 15  # 15 minutes
+SOFT_TIMEOUT = 60 * 10  # 10 minutes
+ACTIVE_LOCKS: Set[str] = set()  # Active redis locks, release them when worker stops
+WORKER_STOPPED = set()  # Worker status
+
+
+@celeryd_init.connect
+def configure_workers(sender=None, conf=None, **kwargs):
+    def patch_psycopg():
+        """
+        Patch postgresql to be friendly with gevent
+        """
+        try:
+            from psycogreen.gevent import patch_psycopg
+            logger.info('Patching psycopg for gevent')
+            patch_psycopg()
+        except ImportError:
+            pass
+    patch_psycopg()
+
+
+@worker_shutting_down.connect
+def worker_shutting_down_handler(sig, how, exitcode, **kwargs):
+    logger.warning('Worker shutting down')
+    gevent.spawn(shutdown_worker)  # If not raises a `BlockingSwitchOutError`
+
+
+def shutdown_worker():
+    WORKER_STOPPED.add(True)
+    if ACTIVE_LOCKS:
+        logger.warning('Force releasing of redis locks %s', ACTIVE_LOCKS)
+        get_redis().delete(*ACTIVE_LOCKS)
+        logger.warning('Released redis locks')
+    else:
+        logger.warning('No redis locks to release')
+
+
+@contextlib.contextmanager
+def ony_one_running_task(task: CeleryTask,
+                         lock_name_suffix: Optional[str] = None,
+                         blocking_timeout: int = 1,
+                         lock_timeout: Optional[int] = LOCK_TIMEOUT):
+    """
+    Ensures one running task at the same, using `task` name as a unique key
+    :param task: CeleryTask
+    :param lock_name_suffix: A suffix for the lock name, in the case that the same task can be run at the same time
+    when it has different arguments
+    :param blocking_timeout: Waiting blocking timeout, it should be as small as possible to the worker can release
+    the task
+    :param lock_timeout: How long the lock will be stored, in case worker is halted so key is not stored forever
+    in Redis
+    :return: Instance of redis `Lock`
+    :raises: LockError if lock cannot be acquired
+    """
+    if WORKER_STOPPED:
+        raise LockError('Worker is stopping')
+    redis = get_redis()
+    lock_name = f'tasks:{task.name}'
+    if lock_name_suffix:
+        lock_name = f'{lock_name}:{lock_name_suffix}'
+    with redis.lock(lock_name, blocking_timeout=blocking_timeout, timeout=lock_timeout) as lock:
+        ACTIVE_LOCKS.add(lock_name)
+        yield lock
+        ACTIVE_LOCKS.remove(lock_name)
+        close_gevent_db_connection()  # Need for django-db-geventpool
+
+
+@app.shared_task(bind=True, soft_time_limit=SOFT_TIMEOUT)
 def index_new_proxies_task(self) -> Optional[int]:
     """
     :return: Number of proxies created
     """
     with contextlib.suppress(LockError):
-        with only_one_running_task(self):
+        with ony_one_running_task(self):
             logger.info('Start indexing of new proxies')
             number_proxies = ProxyFactoryIndexerProvider().start()
             if number_proxies:
@@ -35,8 +105,7 @@ def index_new_proxies_task(self) -> Optional[int]:
                 return number_proxies
 
 
-@app.shared_task(bind=True, soft_time_limit=SOFT_TIMEOUT, autoretry_for=(IOError,),
-                 default_retry_delay=15, retry_kwargs={'max_retries': 3})
+@app.shared_task(bind=True, soft_time_limit=SOFT_TIMEOUT)
 def index_internal_txs_task(self) -> Optional[int]:
     """
     Find and process internal txs for monitored addresses
@@ -44,7 +113,7 @@ def index_internal_txs_task(self) -> Optional[int]:
     """
 
     with contextlib.suppress(LockError):
-        with only_one_running_task(self):
+        with ony_one_running_task(self):
             logger.info('Start indexing of internal txs')
             number_traces = InternalTxIndexerProvider().start()
             logger.info('Find internal txs task processed %d traces', number_traces)
@@ -54,34 +123,14 @@ def index_internal_txs_task(self) -> Optional[int]:
             return number_traces
 
 
-@app.shared_task(bind=True, soft_time_limit=SOFT_TIMEOUT, autoretry_for=(IOError,),
-                 default_retry_delay=15, retry_kwargs={'max_retries': 3})
-def index_safe_events_task(self) -> Optional[int]:
-    """
-    Find and process for monitored addresses
-    :return: Number of addresses processed
-    """
-
-    with contextlib.suppress(LockError):
-        with only_one_running_task(self):
-            logger.info('Start indexing of safe events')
-            number = SafeEventsIndexerProvider().start()
-            logger.info('Find safe events processed %d events', number)
-            if number:
-                logger.info('Calling task to process decoded traces')
-                process_decoded_internal_txs_task.delay()
-            return number
-
-
-@app.shared_task(bind=True, soft_time_limit=SOFT_TIMEOUT, autoretry_for=(IOError,),
-                 default_retry_delay=15, retry_kwargs={'max_retries': 3})
+@app.shared_task(bind=True, soft_time_limit=SOFT_TIMEOUT)
 def index_erc20_events_task(self) -> Optional[int]:
     """
     Find and process internal txs for monitored addresses
     :return: Number of addresses processed
     """
     with contextlib.suppress(LockError):
-        with only_one_running_task(self):
+        with ony_one_running_task(self):
             logger.info('Start indexing of erc20/721 events')
             number_events = Erc20EventsIndexerProvider().start()
             logger.info('Indexing of erc20/721 events task processed %d events', number_events)
@@ -91,7 +140,7 @@ def index_erc20_events_task(self) -> Optional[int]:
 @app.shared_task(bind=True, soft_time_limit=SOFT_TIMEOUT)
 def process_decoded_internal_txs_task(self) -> Optional[int]:
     try:
-        with only_one_running_task(self):
+        with ony_one_running_task(self):
             count = InternalTxDecoded.objects.pending_for_safes().count()
             if not count:
                 logger.info('No decoded internal txs to process')
@@ -112,7 +161,7 @@ def process_decoded_internal_txs_for_safe_task(self, safe_address: str) -> Optio
     :return:
     """
     try:
-        with only_one_running_task(self, lock_name_suffix=safe_address):
+        with ony_one_running_task(self, lock_name_suffix=safe_address):
             logger.info('Start processing decoded internal txs for safe %s', safe_address)
             number_processed = 0
             batch = 100  # Process at most 100 decoded transactions for a single Safe
@@ -134,8 +183,6 @@ def process_decoded_internal_txs_for_safe_task(self, safe_address: str) -> Optio
                 if not internal_txs_decoded:
                     break
                 number_processed += len(tx_processor.process_decoded_transactions(internal_txs_decoded))
-                if not number_processed:
-                    break
                 tx_processor.clear_cache()  # TODO Fix this properly
                 logger.info('Processed %d decoded transactions', number_processed)
             if number_processed:
@@ -152,7 +199,7 @@ def check_reorgs_task(self) -> Optional[int]:
     :return: Number of oldest block with reorg detected. `None` if not reorg found
     """
     try:
-        with only_one_running_task(self):
+        with ony_one_running_task(self):
             logger.info('Start checking of reorgs')
             reorg_service: ReorgService = ReorgServiceProvider()
             first_reorg_block_number = reorg_service.check_reorgs()
@@ -165,7 +212,7 @@ def check_reorgs_task(self) -> Optional[int]:
         pass
 
 
-@app.shared_task(autoretry_for=(IOError,), default_retry_delay=30, retry_kwargs={'max_retries': 3})
+@app.shared_task()
 def send_webhook_task(address: Optional[str], payload: Dict[str, Any]) -> int:
     if not (address and payload):
         return 0
@@ -176,9 +223,17 @@ def send_webhook_task(address: Optional[str], payload: Dict[str, Any]) -> int:
             return 0
 
         sent_requests = 0
-        webhook_type = WebHookType[payload['type']]
         for webhook in webhooks:
-            if not webhook.is_valid_for_webhook_type(webhook_type):
+            webhook_type = WebHookType[payload['type']]
+            if webhook_type == WebHookType.NEW_CONFIRMATION and not webhook.new_confirmation:
+                continue
+            elif webhook_type == WebHookType.PENDING_MULTISIG_TRANSACTION and not webhook.pending_outgoing_transaction:
+                continue
+            elif (webhook_type == WebHookType.EXECUTED_MULTISIG_TRANSACTION and not
+                  webhook.new_executed_outgoing_transaction):
+                continue
+            elif webhook_type in (WebHookType.INCOMING_TOKEN,
+                                  WebHookType.INCOMING_ETHER) and not webhook.new_incoming_transaction:
                 continue
 
             parsed_url = urlparse(webhook.url)
@@ -197,3 +252,22 @@ def send_webhook_task(address: Optional[str], payload: Dict[str, Any]) -> int:
         return sent_requests
     finally:
         close_gevent_db_connection()
+
+
+@app.shared_task()
+def index_contract_metadata() -> int:
+    """
+    Call `index_contracts_metadata` in the `contracts` app to index contracts with missing metadata
+    :return:
+    """
+    batch = 100
+    processed = 0
+
+    while True:
+        addresses = MultisigTransaction.objects.not_indexed_metadata_contract_addresses()[:batch]
+        if not addresses:
+            break
+        else:
+            index_contracts_metadata.delay(list(addresses))
+            processed += len(addresses)
+    return processed

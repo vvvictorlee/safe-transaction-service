@@ -13,10 +13,10 @@ from gnosis.eth.constants import ERC20_721_TRANSFER_TOPIC, NULL_ADDRESS
 from gnosis.safe.safe_signature import SafeSignatureType
 
 from ..models import (EthereumBlock, EthereumEvent, EthereumTx,
-                      EthereumTxCallType, InternalTx, InternalTxDecoded,
-                      InternalTxType, ModuleTransaction, MultisigConfirmation,
-                      MultisigTransaction, ProxyFactory, SafeContract,
-                      SafeContractDelegate, SafeL2MasterCopy, SafeMasterCopy,
+                      EthereumTxCallType, EthereumTxType, InternalTx,
+                      InternalTxDecoded, ModuleTransaction,
+                      MultisigConfirmation, MultisigTransaction, ProxyFactory,
+                      SafeContract, SafeContractDelegate, SafeMasterCopy,
                       SafeStatus, WebHook)
 
 
@@ -84,7 +84,7 @@ class InternalTxFactory(DjangoModelFactory):
     code = None
     output = None
     refund_address = NULL_ADDRESS
-    tx_type = InternalTxType.CALL.value
+    tx_type = EthereumTxType.CALL.value
     call_type = EthereumTxCallType.CALL.value
     trace_address = factory.Sequence(lambda n: str(n))
     error = None
@@ -245,15 +245,9 @@ class ProxyFactoryFactory(MonitoredAddressFactory):
 
 class SafeMasterCopyFactory(MonitoredAddressFactory):
     version = factory.Sequence(lambda n: f'1.0.{n}')
-    deployer = factory.Faker('company')
 
     class Meta:
         model = SafeMasterCopy
-
-
-class SafeL2MasterCopyFactory(SafeMasterCopyFactory):
-    class Meta:
-        model = SafeL2MasterCopy
 
 
 class SafeStatusFactory(DjangoModelFactory):
@@ -273,7 +267,7 @@ class WebHookFactory(DjangoModelFactory):
         model = WebHook
 
     address = factory.LazyFunction(lambda: Account.create().address)
-    url = factory.Sequence(lambda n: f'http://localhost/test/{n}')
+    url = 'http://localhost/test'
     # Configurable webhook types to listen to
     new_confirmation = True
     pending_outgoing_transaction = True

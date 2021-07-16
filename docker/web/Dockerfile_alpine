@@ -1,5 +1,5 @@
 # Less size than Debian, slowest to build
-FROM python:3.9-alpine
+FROM python:3.8-alpine
 
 ENV PYTHONUNBUFFERED 1
 WORKDIR /app
@@ -17,6 +17,6 @@ RUN apk add --update --no-cache tini libpq && \
         -exec rm -rf '{}' +
 
 COPY . .
-RUN DJANGO_SETTINGS_MODULE=config.settings.local DJANGO_DOT_ENV_FILE=.env.local python manage.py collectstatic --noinput
+RUN DJANGO_SETTINGS_MODULE=config.settings.local DJANGO_DOT_ENV_FILE=.env_local python manage.py collectstatic --noinput
 
 ENTRYPOINT ["/sbin/tini", "--"]

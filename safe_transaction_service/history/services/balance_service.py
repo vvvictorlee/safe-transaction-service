@@ -1,29 +1,24 @@
 import logging
 import operator
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Iterator, List, Optional, Sequence
+from functools import cached_property
+from typing import List, Optional, Sequence
 
 from django.db.models import Q
-from django.utils import timezone
 
+import requests
 from cache_memoize import cache_memoize
 from cachetools import TTLCache, cachedmethod
-from eth_typing import ChecksumAddress
-from redis import Redis
+from requests.exceptions import ConnectionError
 from web3 import Web3
 
 from gnosis.eth import EthereumClient, EthereumClientProvider
+from gnosis.eth.ethereum_client import EthereumNetwork, InvalidERC20Info
+from gnosis.eth.oracles import (KyberOracle, OracleException, UniswapOracle,
+                                UniswapV2Oracle)
 
-from safe_transaction_service.tokens.clients import CannotGetPrice
 from safe_transaction_service.tokens.models import Token
-from safe_transaction_service.tokens.services.price_service import (
-    PriceService, PriceServiceProvider)
-from safe_transaction_service.tokens.tasks import (
-    EthValueWithTimestamp, calculate_token_eth_price_task)
-from safe_transaction_service.utils.redis import get_redis
 
-from ..exceptions import NodeConnectionException
 from ..models import EthereumEvent
 
 logger = logging.getLogger(__name__)
@@ -33,9 +28,13 @@ class BalanceServiceException(Exception):
     pass
 
 
+class CannotGetEthereumPrice(BalanceServiceException):
+    pass
+
+
 @dataclass
 class Erc20InfoWithLogo:
-    address: ChecksumAddress
+    address: str
     name: str
     symbol: str
     decimals: int
@@ -52,15 +51,13 @@ class Erc20InfoWithLogo:
 
 @dataclass
 class Balance:
-    token_address: Optional[ChecksumAddress]  # For ether, `token_address` is `None`
+    token_address: Optional[str]  # For ether, `token_address` is `None`
     token: Optional[Erc20InfoWithLogo]
     balance: int
 
 
 @dataclass
 class BalanceWithFiat(Balance):
-    eth_value: float  # Value in ether
-    timestamp: datetime  # Calculated timestamp
     fiat_balance: float
     fiat_conversion: float
     fiat_code: str = 'USD'
@@ -69,25 +66,34 @@ class BalanceWithFiat(Balance):
 class BalanceServiceProvider:
     def __new__(cls):
         if not hasattr(cls, 'instance'):
-            cls.instance = BalanceService(EthereumClientProvider(), PriceServiceProvider(), get_redis())
+            from django.conf import settings
+            cls.instance = BalanceService(EthereumClientProvider(),
+                                          settings.ETH_UNISWAP_FACTORY_ADDRESS,
+                                          settings.ETH_KYBER_NETWORK_PROXY_ADDRESS)
         return cls.instance
 
     @classmethod
     def del_singleton(cls):
-        if hasattr(cls, 'instance'):
+        if hasattr(cls, "instance"):
             del cls.instance
 
 
 class BalanceService:
-    def __init__(self, ethereum_client: EthereumClient, price_service: PriceService, redis: Redis):
+    def __init__(self, ethereum_client: EthereumClient,
+                 uniswap_factory_address: str, kyber_network_proxy_address: str):
         self.ethereum_client = ethereum_client
-        self.ethereum_network = self.ethereum_client.get_network()
-        self.price_service = price_service
-        self.redis = redis
-        self.cache_token_info = TTLCache(maxsize=4096, ttl=60 * 30)  # 2 hours of caching
+        self.uniswap_oracle = UniswapOracle(self.ethereum_client, uniswap_factory_address)
+        self.uniswap_v2_oracle = UniswapV2Oracle(self.ethereum_client)
+        self.kyber_oracle = KyberOracle(self.ethereum_client, kyber_network_proxy_address)
+        self.cache_eth_price = TTLCache(maxsize=2048, ttl=60 * 30)  # 30 minutes of caching
+        self.cache_token_eth_value = TTLCache(maxsize=2048, ttl=60 * 30)  # 30 minutes of caching
+        self.cache_token_info = {}
 
-    def _filter_addresses(self, erc20_addresses: Sequence[ChecksumAddress],
-                          only_trusted: bool, exclude_spam: bool) -> List[ChecksumAddress]:
+    @cached_property
+    def ethereum_network(self):
+        return self.ethereum_client.get_network()
+
+    def _filter_addresses(self, erc20_addresses: Sequence[str], only_trusted: bool, exclude_spam: bool) -> List[str]:
         """
         :param erc20_addresses:
         :param only_trusted:
@@ -115,8 +121,7 @@ class BalanceService:
 
         return addresses
 
-    def get_balances(self, safe_address: ChecksumAddress,
-                     only_trusted: bool = False, exclude_spam: bool = False) -> List[Balance]:
+    def get_balances(self, safe_address: str, only_trusted: bool = False, exclude_spam: bool = False) -> List[Balance]:
         """
         :param safe_address:
         :param only_trusted: If True, return balance only for trusted tokens
@@ -130,11 +135,7 @@ class BalanceService:
             # Store tokens in database if not present
             self.get_token_info(address)  # This is cached
         erc20_addresses = self._filter_addresses(all_erc20_addresses, only_trusted, exclude_spam)
-
-        try:
-            raw_balances = self.ethereum_client.erc20.get_balances(safe_address, erc20_addresses)
-        except IOError as exc:
-            raise NodeConnectionException from exc
+        raw_balances = self.ethereum_client.erc20.get_balances(safe_address, erc20_addresses)
 
         balances = []
         for balance in raw_balances:
@@ -149,42 +150,123 @@ class BalanceService:
             balances.append(Balance(**balance))
         return balances
 
-    def get_cached_token_eth_values(self,
-                                    token_addresses: Sequence[ChecksumAddress]) -> Iterator[EthValueWithTimestamp]:
+    def _get_binance_price(self, symbol: str):
+        url = f'https://api.binance.com/api/v3/avgPrice?symbol={symbol}'
+        try:
+            response = requests.get(url)
+            api_json = response.json()
+            if not response.ok:
+                logger.warning('Cannot get price from url=%s', url)
+                raise CannotGetEthereumPrice(api_json.get('msg'))
+
+            price = float(api_json['price'])
+            if not price:
+                raise CannotGetEthereumPrice(f'Price from url={url} is {price}')
+            return price
+        except (ValueError, ConnectionError) as e:
+            raise CannotGetEthereumPrice from e
+
+    def _get_kraken_price(self, symbol: str):
+        url = f'https://api.kraken.com/0/public/Ticker?pair={symbol}'
+        try:
+            response = requests.get(url)
+            api_json = response.json()
+            error = api_json.get('error')
+            if not response.ok or error:
+                logger.warning('Cannot get price from url=%s', url)
+                raise CannotGetEthereumPrice(str(api_json['error']))
+
+            result = api_json['result']
+            for new_ticker in result:
+                price = float(result[new_ticker]['c'][0])
+                if not price:
+                    raise CannotGetEthereumPrice(f'Price from url={url} is {price}')
+                return price
+        except (ValueError, ConnectionError) as e:
+            raise CannotGetEthereumPrice from e
+
+    def get_dai_usd_price_kraken(self) -> float:
         """
-        Get token eth prices with timestamp of calculation if ready on cache. If not, schedule tasks to do
-        the calculation so next time is available on cache and return `0.` and current datetime
-        :param token_addresses:
-        :return: eth prices with timestamp if ready on cache, `0.` and None otherwise
+        :return: current USD price for ethereum using Kraken
+        :raises: CannotGetEthereumPrice
         """
-        cache_keys = [f'balance-service:{token_address}:eth-price' for token_address in token_addresses]
-        results = self.redis.mget(cache_keys)  # eth_value:epoch_timestamp
-        for token_address, cache_key, result in zip(token_addresses, cache_keys, results):
-            if not token_address:  # Ether, this will not be used
-                yield EthValueWithTimestamp(1., timezone.now())  # Even if not used, Ether value in ether is 1 :)
-            elif result:
-                yield EthValueWithTimestamp.from_string(result.decode())
-            else:
-                task_result = calculate_token_eth_price_task.delay(token_address, cache_key)
-                if task_result.ready():
-                    yield task_result.get()
-                else:
-                    yield EthValueWithTimestamp(0., timezone.now())
+        return self._get_kraken_price('DAIUSD')
+
+    def get_eth_usd_price_binance(self) -> float:
+        """
+        :return: current USD price for ethereum using Kraken
+        :raises: CannotGetEthereumPrice
+        """
+        return self._get_binance_price('BNBUSDT')
+
+    def get_eth_usd_price_kraken(self) -> float:
+        """
+        :return: current USD price for ethereum using Kraken
+        :raises: CannotGetEthereumPrice
+        """
+        return self._get_kraken_price('ETHUSD')
+
+    def get_ewt_usd_price_kucoin(self) -> float:
+        url = 'https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=EWT-USDT'
+        response = requests.get(url)
+        try:
+            result = response.json()
+            return float(result['data']['price'])
+        except (ValueError, ConnectionError) as e:
+            raise CannotGetEthereumPrice from e
+
+    @cachedmethod(cache=operator.attrgetter('cache_eth_price'))
+    @cache_memoize(60 * 30, prefix='balances-get_eth_price')  # 30 minutes
+    def get_eth_price(self) -> float:
+        """
+        Get USD price for Ether. On xDAI we use DAI price.
+        :return: USD price for Ether
+        """
+        if self.ethereum_network == EthereumNetwork.XDAI:
+            try:
+                return self.get_dai_usd_price_kraken()
+            except CannotGetEthereumPrice:
+                return 1  # DAI/USD should be close to 1
+        elif self.ethereum_network in (EthereumNetwork.ENERGY_WEB_CHAIN, EthereumNetwork.VOLTA):
+            return self.get_ewt_usd_price_kucoin()
+        else:
+            return self.get_eth_usd_price_binance()
+
+    @cachedmethod(cache=operator.attrgetter('cache_token_eth_value'))
+    @cache_memoize(60 * 30, prefix='balances-get_token_eth_value')  # 30 minutes
+    def get_token_eth_value(self, token_address: str) -> float:
+        """
+        Return current ether value for a given `token_address`
+        """
+        for oracle in (self.kyber_oracle, self.uniswap_v2_oracle, self.uniswap_oracle):
+            try:
+                return oracle.get_price(token_address)
+            except OracleException:
+                logger.info('Cannot get eth value for token-address=%s from %s, trying Uniswap V2', token_address,
+                            oracle.__class__.__name__)
+
+        logger.warning('Cannot find eth value for token-address=%s', token_address)
+        return 0.
 
     @cachedmethod(cache=operator.attrgetter('cache_token_info'))
-    @cache_memoize(60 * 60, prefix='balances-get_token_info')  # 1 hour
-    def get_token_info(self, token_address: ChecksumAddress) -> Optional[Erc20InfoWithLogo]:
+    @cache_memoize(60 * 60 * 24, prefix='balances-get_token_info')  # 1 day
+    def get_token_info(self, token_address: str) -> Optional[Erc20InfoWithLogo]:
         try:
             token = Token.objects.get(address=token_address)
             return Erc20InfoWithLogo.from_token(token)
         except Token.DoesNotExist:
-            if token := Token.objects.create_from_blockchain(token_address):
+            try:
+                erc20_info = self.ethereum_client.erc20.get_info(token_address)
+                token = Token.objects.create(address=token_address,
+                                             name=erc20_info.name,
+                                             symbol=erc20_info.symbol,
+                                             decimals=erc20_info.decimals)
                 return Erc20InfoWithLogo.from_token(token)
-            else:
+            except InvalidERC20Info:
                 logger.warning('Cannot get erc20 token info for token-address=%s', token_address)
                 return None
 
-    def get_usd_balances(self, safe_address: ChecksumAddress, only_trusted: bool = False,
+    def get_usd_balances(self, safe_address: str, only_trusted: bool = False,
                          exclude_spam: bool = False) -> List[BalanceWithFiat]:
         """
         All this could be more optimal (e.g. batching requests), but as everything is cached
@@ -195,36 +277,28 @@ class BalanceService:
         :return: List of BalanceWithFiat
         """
         balances: List[Balance] = self.get_balances(safe_address, only_trusted, exclude_spam)
-        try:
-            eth_price = self.price_service.get_eth_usd_price()
-        except CannotGetPrice:
-            logger.warning('Cannot get network ether price', exc_info=True)
-            eth_price = 0
+        eth_value = self.get_eth_price()
         balances_with_usd = []
-        token_addresses = [balance.token_address for balance in balances]
-        token_eth_values_with_timestamp = self.get_cached_token_eth_values(token_addresses)
-        for balance, token_eth_value_with_timestamp in zip(balances, token_eth_values_with_timestamp):
-            token_eth_value = token_eth_value_with_timestamp.eth_value
+        for balance in balances:
             token_address = balance.token_address
             if not token_address:  # Ether
-                fiat_conversion = eth_price
+                fiat_conversion = eth_value
                 fiat_balance = fiat_conversion * (balance.balance / 10**18)
             else:
-                fiat_conversion = eth_price * token_eth_value
-                balance_with_decimals = balance.balance / 10**balance.token.decimals
-                fiat_balance = fiat_conversion * balance_with_decimals
+                token_to_eth_price = self.get_token_eth_value(token_address)
+                if token_to_eth_price:
+                    fiat_conversion = eth_value * token_to_eth_price
+                    balance_with_decimals = balance.balance / 10**balance.token.decimals
+                    fiat_balance = fiat_conversion * balance_with_decimals
+                else:
+                    fiat_conversion = 0.
+                    fiat_balance = 0.
 
-            balances_with_usd.append(
-                BalanceWithFiat(
-                    balance.token_address,
-                    balance.token,
-                    balance.balance,
-                    token_eth_value,
-                    token_eth_value_with_timestamp.timestamp,
-                    round(fiat_balance, 4),
-                    round(fiat_conversion, 4),
-                    'USD'
-                )
-            )
+            balances_with_usd.append(BalanceWithFiat(balance.token_address,
+                                                     balance.token,
+                                                     balance.balance,
+                                                     round(fiat_balance, 4),
+                                                     round(fiat_conversion, 4),
+                                                     'USD'))
 
         return balances_with_usd

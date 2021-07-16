@@ -39,7 +39,7 @@ class IndexServiceProvider:
 
     @classmethod
     def del_singleton(cls):
-        if hasattr(cls, 'instance'):
+        if hasattr(cls, "instance"):
             del cls.instance
 
 
@@ -101,10 +101,9 @@ class IndexService:
                 tx_receipts.append(tx_receipt)
 
         # Get transactions for hashes not in db
-        fetched_txs = self.ethereum_client.get_transactions(tx_hashes_not_in_db)
+        txs = self.ethereum_client.get_transactions(tx_hashes_not_in_db)
         block_numbers = set()
-        txs = []
-        for tx_hash, tx in zip(tx_hashes_not_in_db, fetched_txs):
+        for tx_hash, tx in zip(tx_hashes_not_in_db, txs):
             tx = tx or self.ethereum_client.get_transaction(tx_hash)  # Retry fetching if failed
             if not tx:
                 raise TransactionNotFoundException(f'Cannot find tx with tx-hash={HexBytes(tx_hash).hex()}')
@@ -112,7 +111,6 @@ class IndexService:
                 raise TransactionWithoutBlockException(f'Cannot find blockNumber for tx with '
                                                        f'tx-hash={HexBytes(tx_hash).hex()}')
             block_numbers.add(tx['blockNumber'])
-            txs.append(tx)
 
         blocks = self.ethereum_client.get_blocks(block_numbers)
         block_dict = {}
@@ -147,42 +145,6 @@ class IndexService:
         return list(ethereum_txs_dict.values())
 
     @transaction.atomic
-    def _reindex(self, addresses: List[str]):
-        """
-        Trigger processing of traces again. If addresses is empty, everything is reprocessed
-        :param addresses:
-        :return:
-        """
-        queryset = MultisigConfirmation.objects.filter(signature=None)
-        if not addresses:
-            logger.info('Remove onchain confirmations')
-            queryset.delete()
-
-        logger.info('Remove transactions automatically indexed')
-        queryset = MultisigTransaction.objects.exclude(ethereum_tx=None)
-        if addresses:
-            queryset = queryset.filter(safe__in=addresses)
-        queryset.delete()
-
-        logger.info('Remove module transactions')
-        queryset = ModuleTransaction.objects.all()
-        if addresses:
-            queryset = queryset.filter(safe__in=addresses)
-        queryset.delete()
-
-        logger.info('Remove Safe statuses')
-
-        queryset = SafeStatus.objects.all()
-        if addresses:
-            queryset = queryset.filter(address__in=addresses)
-        queryset.delete()
-
-        logger.info('Mark all internal txs decoded as not processed')
-        queryset = InternalTxDecoded.objects.all()
-        if addresses:
-            queryset = queryset.filter(internal_tx___from__in=addresses)
-        queryset.update(processed=False)
-
     def reindex_addresses(self, addresses: List[str]):
         """
         Given a list of safe addresses it will delete all `SafeStatus`, conflicting `MultisigTxs` and will mark
@@ -193,7 +155,24 @@ class IndexService:
         if not addresses:
             return
 
-        return self._reindex(addresses)
+        SafeStatus.objects.filter(address__in=addresses).delete()
+        MultisigTransaction.objects.exclude(
+            ethereum_tx=None
+        ).filter(
+            safe__in=addresses
+        ).delete()  # Remove not indexed transactions
+        ModuleTransaction.objects.filter(safe__in=addresses).delete()
+        InternalTxDecoded.objects.filter(internal_tx___from__in=addresses).update(processed=False)
 
+    @transaction.atomic
     def reindex_all(self):
-        return self._reindex(None)
+        logger.info('Remove onchain confirmations')
+        MultisigConfirmation.objects.filter(signature=None).delete()
+        logger.info('Remove transactions automatically indexed')
+        MultisigTransaction.objects.exclude(ethereum_tx=None).delete()
+        logger.info('Remove module transactions')
+        ModuleTransaction.objects.all().delete()
+        logger.info('Remove Safe statuses')
+        SafeStatus.objects.all().delete()
+        logger.info('Mark all internal txs decoded as not processed')
+        InternalTxDecoded.objects.update(processed=False)

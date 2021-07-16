@@ -1,6 +1,5 @@
 import uuid
 from enum import Enum
-from typing import List, Sequence
 
 from django.db import models
 
@@ -34,28 +33,7 @@ class FirebaseDevice(models.Model):
         return f'{device_name} {self.version} - {token}...'
 
 
-class FirebaseDeviceOwnerManager(models.Manager):
-    def get_devices_for_safe_and_owners(self, safe_address, owners: Sequence[str]) -> List[str]:
-        """
-        :param safe_address:
-        :param owners:
-        :return: List of cloud messaging tokens for owners (unique and not empty) linked to a Safe. If owner is not
-        linked to the Safe it will not be returned.
-        """
-        return list(
-            self.filter(
-                firebase_device__safes__address=safe_address,
-                owner__in=owners
-            ).exclude(
-                firebase_device__cloud_messaging_token=None
-            ).values_list(
-                'firebase_device__cloud_messaging_token', flat=True
-            ).distinct()
-        )
-
-
 class FirebaseDeviceOwner(models.Model):
-    objects = FirebaseDeviceOwnerManager()
     firebase_device = models.ForeignKey(FirebaseDevice, on_delete=models.CASCADE, related_name='owners')
     owner = EthereumAddressField(db_index=True)
 

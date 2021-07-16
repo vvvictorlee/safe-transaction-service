@@ -1,4 +1,3 @@
-import concurrent
 import logging
 import operator
 from dataclasses import dataclass, field
@@ -10,18 +9,13 @@ from django.db.models import Q
 import requests
 from cache_memoize import cache_memoize
 from cachetools import TTLCache, cachedmethod
-from redis import Redis
 
 from gnosis.eth import EthereumClient, EthereumClientProvider
+from gnosis.eth.ethereum_client import Erc721Info, InvalidERC721Info
 
-from safe_transaction_service.tokens.constants import (
-    CRYPTO_KITTIES_CONTRACT_ADDRESSES, ENS_CONTRACTS_WITH_TLD)
 from safe_transaction_service.tokens.models import Token
-from safe_transaction_service.utils.redis import get_redis
-from safe_transaction_service.utils.utils import chunks
 
 from ..clients import EnsClient
-from ..exceptions import NodeConnectionException
 from ..models import EthereumEvent
 
 logger = logging.getLogger(__name__)
@@ -102,43 +96,38 @@ class CollectibleWithMetadata(Collectible):
 class CollectiblesServiceProvider:
     def __new__(cls):
         if not hasattr(cls, 'instance'):
-            cls.instance = CollectiblesService(EthereumClientProvider(), get_redis())
+            cls.instance = CollectiblesService(EthereumClientProvider())
 
         return cls.instance
 
     @classmethod
     def del_singleton(cls):
-        if hasattr(cls, 'instance'):
+        if hasattr(cls, "instance"):
             del cls.instance
 
 
 class CollectiblesService:
-    ENS_IMAGE_URL = 'https://gnosis-safe-token-logos.s3.amazonaws.com/ENS.png'
-    IPFS_GATEWAY = 'https://cloudflare-ipfs.com/'
-    METDATA_MAX_CONTENT_LENGTH = int(0.2 * 1024 * 1024)  # 0.2Mb is the maximum metadata size allowed
+    CRYPTO_KITTIES_CONTRACT_ADDRESSES = {
+        '0x06012c8cf97BEaD5deAe237070F9587f8E7A266d',  # Mainnet
+        '0x16baF0dE678E52367adC69fD067E5eDd1D33e3bF'  # Rinkeby
+    }
+    ENS_CONTRACTS_WITH_TLD = {
+        '0x57f1887a8BF19b14fC0dF6Fd9B2acc9Af147eA85': 'eth',  # ENS .eth registrar (Every network)
+    }
+    ENS_IMAGE_FILENAME = 'ENS.png'
+    ENS_IMAGE_URL = f'https://gnosis-safe-token-logos.s3.amazonaws.com/{ENS_IMAGE_FILENAME}'
+    IPFS_GATEWAY = 'https://ipfs.io/'
 
-    def __init__(self, ethereum_client: EthereumClient, redis: Redis):
+    def __init__(self, ethereum_client: EthereumClient):
         self.ethereum_client = ethereum_client
-        self.ethereum_network = ethereum_client.get_network()
-        self.redis = redis
-        self.ens_service: EnsClient = EnsClient(self.ethereum_network.value)
+        self.ens_service: EnsClient = EnsClient(ethereum_client.get_network().value)
 
-        self.cache_uri_metadata = TTLCache(maxsize=4096,
-                                           ttl=60 * 60 * 24)  # 1 day of caching
-        self.cache_token_info: TTLCache[str, Erc721InfoWithLogo] = TTLCache(maxsize=4096,
-                                                                            ttl=60 * 30)  # 2 hours of caching
+        self.cache_uri_metadata = TTLCache(maxsize=1024, ttl=60 * 60 * 24)  # 1 day of caching
+        self.cache_token_info: Dict[str, Tuple[str, str]] = {}
         self.cache_token_uri: Dict[Tuple[str, int], str] = {}
 
-    def ipfs_to_http(self, uri: Optional[str]) -> Optional[str]:
-        if uri and uri.startswith('ipfs://'):
-            return urljoin(self.IPFS_GATEWAY, uri.replace('ipfs://', '', 1))  # Use ipfs gateway
-        else:
-            return uri
-
     @cachedmethod(cache=operator.attrgetter('cache_uri_metadata'))
-    @cache_memoize(60 * 60 * 24,
-                   prefix='collectibles-_retrieve_metadata_from_uri',
-                   cache_exceptions=(MetadataRetrievalException,))  # 1 day
+    @cache_memoize(60 * 60 * 24, prefix='collectibles-_retrieve_metadata_from_uri')  # 1 day
     def _retrieve_metadata_from_uri(self, uri: str) -> Dict[Any, Any]:
         """
         Get metadata from uri. Maybe at some point support IPFS or another protocols. Currently just http/https is
@@ -146,35 +135,28 @@ class CollectiblesService:
         :param uri: Uri starting with the protocol, like http://example.org/token/3
         :return: Metadata as a decoded json
         """
-        uri = self.ipfs_to_http(uri)
+        if uri and uri.startswith('ipfs://'):
+            uri = urljoin(self.IPFS_GATEWAY, uri.replace('ipfs://', ''))  # Use ipfs gateway
 
         if not uri or not uri.startswith('http'):
             raise MetadataRetrievalException(uri)
 
         try:
             logger.debug('Getting metadata for uri=%s', uri)
-            response = requests.get(uri, timeout=5, stream=True)
+            response = requests.get(uri)
             if not response.ok:
                 logger.debug('Cannot get metadata for uri=%s', uri)
                 raise MetadataRetrievalException(uri)
-
-            content_length = response.headers.get('content-length', 0)
-            content_type = response.headers.get('content-type', '')
-            if int(content_length) > self.METDATA_MAX_CONTENT_LENGTH:
-                raise MetadataRetrievalException(f'Content-length={content_length} for uri={uri} is too big')
-            elif 'application/json' not in content_type:
-                raise MetadataRetrievalException(f'Content-type={content_type} for uri={uri} is not valid, expected '
-                                                 f'"application/json"')
             else:
                 logger.debug('Got metadata for uri=%s', uri)
                 return response.json()
-        except (IOError, ValueError) as e:
+        except (requests.RequestException, ValueError) as e:
             raise MetadataRetrievalException(uri) from e
 
     def build_collectible(self, token_info: Optional[Erc721InfoWithLogo], token_address: str, token_id: int,
                           token_metadata_uri: Optional[str]) -> Collectible:
         if not token_metadata_uri:
-            if token_address in CRYPTO_KITTIES_CONTRACT_ADDRESSES:
+            if token_address in self.CRYPTO_KITTIES_CONTRACT_ADDRESSES:
                 token_metadata_uri = f'https://api.cryptokitties.co/kitties/{token_id}'
             else:
                 logger.info('Not available token_uri to retrieve metadata for ERC721 token=%s with token-id=%d',
@@ -185,7 +167,7 @@ class CollectiblesService:
         return Collectible(name, symbol, logo_uri, token_address, token_id, token_metadata_uri)
 
     def get_metadata(self, collectible: Collectible) -> Dict[Any, Any]:
-        if tld := ENS_CONTRACTS_WITH_TLD.get(collectible.address):  # Special case for ENS
+        if tld := self.ENS_CONTRACTS_WITH_TLD.get(collectible.address):  # Special case for ENS
             label_name = self.ens_service.query_by_domain_hash(collectible.id)
             return {
                 'name': f'{label_name}.{tld}' if label_name else f'.{tld}',
@@ -244,10 +226,7 @@ class CollectiblesService:
             return []
 
         logger.debug('Getting token_uris for %s', addresses_with_token_ids)
-        # Chunk token uris to prevent stressing the node
-        token_uris = []
-        for addresses_with_token_ids_chunk in chunks(addresses_with_token_ids, 50):
-            token_uris.extend(self.get_token_uris(addresses_with_token_ids_chunk))
+        token_uris = self.get_token_uris(addresses_with_token_ids)
         logger.debug('Got token_uris for %s', addresses_with_token_ids)
         collectibles = []
         for (token_address, token_id), token_uri in zip(addresses_with_token_ids, token_uris):
@@ -266,33 +245,23 @@ class CollectiblesService:
         :param exclude_spam: If True, exclude spam tokens
         :return:
         """
-        collectibles_with_metadata: Dict[(str, int), CollectibleWithMetadata] = dict()
-        collectibles = self.get_collectibles(safe_address, only_trusted=only_trusted, exclude_spam=exclude_spam)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
-            future_to_collectible = {executor.submit(self.get_metadata, collectible): collectible
-                                     for collectible in collectibles}
-            for future in concurrent.futures.as_completed(future_to_collectible):
-                collectible = future_to_collectible[future]
-                try:
-                    metadata = future.result()
-                except MetadataRetrievalException:
-                    metadata = {}
-                    logger.warning(f'Cannot retrieve token-uri={collectible.uri} '
-                                   f'for token-address={collectible.address}')
+        collectibles_with_metadata = []
+        for collectible in self.get_collectibles(safe_address, only_trusted=only_trusted, exclude_spam=exclude_spam):
+            try:
+                metadata = self.get_metadata(collectible)
+            except MetadataRetrievalException:
+                metadata = {}
+                logger.warning(f'Cannot retrieve token-uri={collectible.uri} '
+                               f'for token-address={collectible.address}')
 
-                collectibles_with_metadata[collectible.address, collectible.id] = CollectibleWithMetadata(
-                    collectible.token_name,
-                    collectible.token_symbol,
-                    self.ipfs_to_http(collectible.logo_uri),
-                    collectible.address,
-                    collectible.id,
-                    collectible.uri,
-                    metadata
-                )
-        return [collectibles_with_metadata[collectible.address, collectible.id] for collectible in collectibles]
+            collectibles_with_metadata.append(
+                CollectibleWithMetadata(collectible.token_name, collectible.token_symbol, collectible.logo_uri,
+                                        collectible.address, collectible.id, collectible.uri, metadata)
+            )
+        return collectibles_with_metadata
 
     @cachedmethod(cache=operator.attrgetter('cache_token_info'))
-    @cache_memoize(60 * 60, prefix='collectibles-get_token_info')  # 1 hour
+    @cache_memoize(60 * 60 * 24, prefix='collectibles-get_token_info')  # 1 day
     def get_token_info(self, token_address: str) -> Optional[Erc721InfoWithLogo]:
         """
         :param token_address:
@@ -302,61 +271,55 @@ class CollectiblesService:
             token = Token.objects.get(address=token_address)
             return Erc721InfoWithLogo.from_token(token)
         except Token.DoesNotExist:
-            if token := Token.objects.create_from_blockchain(token_address):
+            logo_uri = ''
+            trusted = False
+            if token_address in self.ENS_CONTRACTS_WITH_TLD:
+                token_info = Erc721Info('Ethereum Name Service', 'ENS')
+                logo_uri = self.ENS_IMAGE_FILENAME
+                trusted = True
+            else:
+                token_info = self.retrieve_token_info(token_address)
+
+            # If symbol is way bigger than name, swap them (e.g. POAP)
+            if token_info:
+                if (len(token_info.name) - len(token_info.symbol)) < -5:
+                    token_info = Erc721Info(token_info.symbol, token_info.name)
+
+                token = Token.objects.create(address=token_address,
+                                             name=token_info.name,
+                                             symbol=token_info.symbol,
+                                             decimals=None,
+                                             logo_uri=logo_uri,
+                                             trusted=trusted)
                 return Erc721InfoWithLogo.from_token(token)
+
+        return token_info
 
     def get_token_uris(self, addresses_with_token_ids: Sequence[Tuple[str, int]]) -> List[Optional[str]]:
         """
         Cache token_uris, as they shouldn't change
         :param addresses_with_token_ids:
-        :return: List of token_uris in the same other that `addresses_with_token_ids` were provided
+        :return: List of token_uris in the same orther that `addresses_with_token_ids` were provided
         """
-        def get_redis_key(address_with_token_id: Tuple[str, int]):
-            token_address, token_id = address_with_token_id
-            return f'token-uri:{token_address}:{token_id}'
-
-        def get_not_found_cache():
-            """
-            :return: address_with_token_id not found on the local cache
-            """
-            return [address_with_token_id for address_with_token_id in addresses_with_token_ids
-                    if address_with_token_id not in self.cache_token_uri]
-
-        # Find uris in local cache
-        not_found_cache = get_not_found_cache()
-
-        # Try finding missing token uris in redis
-        redis_token_uris = self.redis.mget([get_redis_key(address_with_token_id)
-                                            for address_with_token_id in not_found_cache])
-        # Redis does not allow `None`, so empty string is used
-        self.cache_token_uri.update({address_with_token_id: token_uri.decode() if token_uri else None
-                                     for address_with_token_id, token_uri
-                                     in zip(not_found_cache, redis_token_uris)
-                                     if token_uri is not None})
-
-        not_found_cache = [address_with_token_id for address_with_token_id in addresses_with_token_ids
-                           if address_with_token_id not in self.cache_token_uri]
-
-        try:
-            # Find missing token uris in blockchain
-            logger.debug('Getting token uris from blockchain for %d addresses with token ids',
-                         len(not_found_cache))
-            blockchain_token_uris = {address_with_token_id: token_uri if token_uri else None
-                                     for address_with_token_id, token_uri
-                                     in zip(not_found_cache,
-                                            self.ethereum_client.erc721.get_token_uris(not_found_cache))}
-            logger.debug('Got token uris')
-            if blockchain_token_uris:
-                self.cache_token_uri.update(blockchain_token_uris)
-                pipe = self.redis.pipeline()
-                redis_map_to_store = {get_redis_key(address_with_token_id): token_uri if token_uri is not None else ''
-                                      for address_with_token_id, token_uri in blockchain_token_uris.items()}
-                pipe.mset(redis_map_to_store)
-                for key in redis_map_to_store.keys():
-                    pipe.expire(key, 60 * 60 * 24)  # 1 day of caching
-                pipe.execute()
-        except IOError as exc:
-            raise NodeConnectionException from exc
+        not_found = [address_with_token_id for address_with_token_id in addresses_with_token_ids
+                     if address_with_token_id not in self.cache_token_uri]
+        # Find missing in database
+        self.cache_token_uri.update({address_with_token_id: token_uri
+                                    for address_with_token_id, token_uri
+                                    in zip(not_found,
+                                           self.ethereum_client.erc721.get_token_uris(not_found))})
 
         return [self.cache_token_uri[address_with_token_id]
                 for address_with_token_id in addresses_with_token_ids]
+
+    def retrieve_token_info(self, token_address: str) -> Optional[Erc721Info]:
+        """
+        Queries blockchain for the token name and symbol
+        :param token_address: address for a erc721 token
+        :return: tuple with name and symbol of the erc721 token
+        """
+        try:
+            logger.debug('Querying blockchain for info for token=%s', token_address)
+            return self.ethereum_client.erc721.get_info(token_address)
+        except InvalidERC721Info:
+            logger.warning('Cannot get erc721 token info for token-address=%s', token_address)

@@ -6,15 +6,15 @@ from eth_account import Account
 from web3 import Web3
 
 from safe_transaction_service.history.models import (EthereumTxCallType,
+                                                     EthereumTxType,
                                                      InternalTx,
-                                                     InternalTxType,
                                                      MultisigConfirmation,
                                                      MultisigTransaction,
                                                      WebHookType)
 from safe_transaction_service.history.signals import build_webhook_payload
 from safe_transaction_service.history.tests.factories import (
     InternalTxFactory, MultisigConfirmationFactory, MultisigTransactionFactory,
-    SafeContractFactory, SafeStatusFactory)
+    SafeStatusFactory)
 
 from ..tasks import (DuplicateNotification, filter_notification,
                      send_notification_owner_task, send_notification_task)
@@ -41,47 +41,42 @@ class TestViews(TestCase):
 
     def test_filter_notification(self):
         multisig_confirmation = MultisigConfirmationFactory()
-        confirmation_notification = build_webhook_payload(MultisigConfirmation, multisig_confirmation)[0]
+        confirmation_notification = build_webhook_payload(MultisigConfirmation, multisig_confirmation)
         # Confirmations for executed transaction should be filtered out
         self.assertFalse(filter_notification(confirmation_notification))
         multisig_confirmation.multisig_transaction.ethereum_tx.block = None
         multisig_confirmation.multisig_transaction.ethereum_tx.save()
-        confirmation_notification = build_webhook_payload(MultisigConfirmation, multisig_confirmation)[0]
+        confirmation_notification = build_webhook_payload(MultisigConfirmation, multisig_confirmation)
         # All confirmations are disabled for now
         # self.assertTrue(filter_notification(confirmation_notification))
         self.assertFalse(filter_notification(confirmation_notification))
 
         # Pending multisig transaction should be filtered out
         multisig_transaction = MultisigTransactionFactory()
-        transaction_notification = build_webhook_payload(MultisigTransaction, multisig_transaction)[0]
+        transaction_notification = build_webhook_payload(MultisigTransaction, multisig_transaction)
         self.assertTrue(filter_notification(transaction_notification))
 
         multisig_transaction.ethereum_tx = None
         multisig_transaction.save()
-        pending_transaction_notification = build_webhook_payload(MultisigTransaction, multisig_transaction)[0]
+        pending_transaction_notification = build_webhook_payload(MultisigTransaction, multisig_transaction)
         self.assertNotEqual(multisig_transaction, pending_transaction_notification)
         self.assertFalse(filter_notification(pending_transaction_notification))
 
         # Incoming transaction to a Safe must be filtered out if it was triggered by that same Safe
         internal_tx = InternalTxFactory(
             value=5,
-            tx_type=InternalTxType.CALL.value,
+            tx_type=EthereumTxType.CALL.value,
             call_type=EthereumTxCallType.CALL.value
         )
-        incoming_internal_tx_payload, outgoing_internal_tx_payload = build_webhook_payload(InternalTx, internal_tx)
-
-        self.assertEqual(outgoing_internal_tx_payload['address'], internal_tx._from)
-        self.assertFalse(filter_notification(outgoing_internal_tx_payload))
-
-        self.assertEqual(incoming_internal_tx_payload['address'], internal_tx.to)
-        self.assertTrue(filter_notification(incoming_internal_tx_payload))
+        internal_tx_payload = build_webhook_payload(InternalTx, internal_tx)
+        self.assertEqual(internal_tx_payload['address'], internal_tx.to)
+        self.assertTrue(filter_notification(internal_tx_payload))
         MultisigTransactionFactory(safe=internal_tx.to, ethereum_tx=internal_tx.ethereum_tx)
-        self.assertFalse(filter_notification(incoming_internal_tx_payload))
+        self.assertFalse(filter_notification(internal_tx_payload))
 
     def test_send_notification_owner_task(self):
         from ..tasks import logger as task_logger
-        safe_contract = SafeContractFactory()
-        safe_address = safe_contract.address
+        safe_address = Account.create().address
         threshold = 2
         owners = [Account.create().address for _ in range(2)]
         safe_tx_hash = Web3.keccak(text='hola').hex()
@@ -89,23 +84,15 @@ class TestViews(TestCase):
             self.assertEqual(send_notification_owner_task(safe_address, safe_tx_hash), (0, 0))
             self.assertIn('Cannot find threshold information', cm.output[0])
 
-        safe_status = SafeStatusFactory(address=safe_address, threshold=1, owners=owners)
-        with self.assertLogs(logger=task_logger) as cm:
-            self.assertEqual(send_notification_owner_task(safe_address, safe_tx_hash), (0, 0))
-            self.assertIn('No need to send confirmation notification for ', cm.output[0])
-
-        safe_status.threshold = threshold
-        safe_status.save(update_fields=['threshold'])
+        SafeStatusFactory(address=safe_address, threshold=threshold, owners=owners)
         with self.assertLogs(logger=task_logger) as cm:
             self.assertEqual(send_notification_owner_task(safe_address, safe_tx_hash), (0, 0))
             self.assertIn('No cloud messaging tokens found', cm.output[0])
 
-        firebase_device_owner_factories = [FirebaseDeviceOwnerFactory(owner=owner) for owner in owners]
-        # Notification is not sent to both owners as they are not related to the safe address
-        self.assertEqual(send_notification_owner_task(safe_address, safe_tx_hash), (0, 0))
+        for owner in owners:
+            FirebaseDeviceOwnerFactory(owner=owner)
 
-        for firebase_device_owner in firebase_device_owner_factories:
-            firebase_device_owner.firebase_device.safes.add(safe_contract)
+        # Notification was sent to both owners
         self.assertEqual(send_notification_owner_task(safe_address, safe_tx_hash), (2, 0))
 
         # Duplicated notifications are not sent

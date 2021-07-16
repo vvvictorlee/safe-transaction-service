@@ -1,27 +1,25 @@
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from drf_yasg.utils import swagger_serializer_method
 from rest_framework import serializers
 from rest_framework.exceptions import NotFound, ValidationError
 from web3.exceptions import BadFunctionCallOutput
 
-from gnosis.eth import EthereumClient, EthereumClientProvider
+from gnosis.eth import EthereumClientProvider
 from gnosis.eth.django.serializers import (EthereumAddressField,
                                            HexadecimalField, Sha3HashField)
 from gnosis.safe import Safe
 from gnosis.safe.safe_signature import SafeSignature, SafeSignatureType
 from gnosis.safe.serializers import SafeMultisigTxSerializerV1
 
-from safe_transaction_service.contracts.tx_decoder import (TxDecoderException,
-                                                           get_db_tx_decoder)
 from safe_transaction_service.tokens.serializers import \
     TokenInfoResponseSerializer
 
-from .exceptions import NodeConnectionException
 from .helpers import DelegateSignatureHelper
-from .models import (EthereumTx, ModuleTransaction, MultisigConfirmation,
-                     MultisigTransaction, SafeContract, SafeContractDelegate)
+from .indexers.tx_decoder import TxDecoderException, get_db_tx_decoder
+from .models import (ConfirmationType, EthereumTx, ModuleTransaction,
+                     MultisigConfirmation, MultisigTransaction, SafeContract,
+                     SafeContractDelegate)
 from .services.safe_service import SafeCreationInfo
 
 
@@ -100,7 +98,7 @@ class SafeMultisigTransactionSerializer(SafeMultisigTxSerializerV1):
     sender = EthereumAddressField()
     # TODO Make signature mandatory
     signature = HexadecimalField(required=False, min_length=65)  # Signatures must be at least 65 bytes
-    origin = serializers.CharField(max_length=200, allow_null=True, default=None)
+    origin = serializers.CharField(max_length=100, allow_null=True, default=None)
 
     def validate(self, data):
         super().validate(data)
@@ -112,8 +110,6 @@ class SafeMultisigTransactionSerializer(SafeMultisigTxSerializerV1):
         except BadFunctionCallOutput as e:
             raise ValidationError(f'Could not get Safe version from blockchain, check contract exists on network '
                                   f'{ethereum_client.get_network().name}') from e
-        except IOError:
-            raise ValidationError('Problem connecting to the ethereum node, please try again later')
 
         safe_tx = safe.build_multisig_tx(data['to'], data['value'], data['data'], data['operation'],
                                          data['safe_tx_gas'], data['base_gas'], data['gas_price'],
@@ -149,8 +145,6 @@ class SafeMultisigTransactionSerializer(SafeMultisigTxSerializerV1):
             safe_owners = safe.retrieve_owners(block_identifier='pending')
         except BadFunctionCallOutput:  # Error using pending block identifier
             safe_owners = safe.retrieve_owners(block_identifier='latest')
-        except IOError:
-            raise ValidationError('Problem connecting to the ethereum node, please try again later')
 
         data['safe_owners'] = safe_owners
 
@@ -231,35 +225,14 @@ class SafeMultisigTransactionSerializer(SafeMultisigTxSerializerV1):
         return multisig_transaction
 
 
-class SafeMultisigTransactionEstimateSerializer(serializers.Serializer):
-    to = EthereumAddressField()
-    value = serializers.IntegerField(min_value=0)
-    data = HexadecimalField(default=None, allow_null=True, allow_blank=True)
-    operation = serializers.IntegerField(min_value=0)
-
-    def save(self, **kwargs):
-        safe_address = self.context['safe_address']
-        ethereum_client = EthereumClientProvider()
-        safe = Safe(safe_address, ethereum_client)
-        try:
-            safe_tx_gas = safe.estimate_tx_gas(self.validated_data['to'], self.validated_data['value'],
-                                               self.validated_data['data'], self.validated_data['operation'])
-        except IOError as exc:
-            raise NodeConnectionException(f'Node connection error when estimating gas for safe {safe_address}') from exc
-        return {'safe_tx_gas': safe_tx_gas}
-
-
 class SafeDelegateDeleteSerializer(serializers.Serializer):
     safe = EthereumAddressField()
     delegate = EthereumAddressField()
     signature = HexadecimalField(min_length=65)
 
-    def check_signature(self, ethereum_client: EthereumClient, safe_address: str,
-                        signature: bytes, operation_hash: bytes, safe_owners: List[str]) -> Optional[str]:
+    def check_signature(self, signature: bytes, operation_hash: bytes, safe_owners: List[str]) -> Optional[str]:
         """
         Checks signature and returns a valid owner if found, None otherwise
-        :param ethereum_client:
-        :param safe_address:
         :param signature:
         :param operation_hash:
         :param safe_owners:
@@ -274,7 +247,7 @@ class SafeDelegateDeleteSerializer(serializers.Serializer):
         safe_signature = safe_signatures[0]
         delegator = safe_signature.owner
         if delegator in safe_owners:
-            if not safe_signature.is_valid(ethereum_client, safe_address):
+            if not safe_signature.is_valid():
                 raise ValidationError(f'Signature of type={safe_signature.signature_type.name} '
                                       f'for delegator={delegator} is not valid')
             return delegator
@@ -282,12 +255,11 @@ class SafeDelegateDeleteSerializer(serializers.Serializer):
     def validate(self, data):
         super().validate(data)
 
-        safe_address = data['safe']
-        if not SafeContract.objects.filter(address=safe_address).exists():
-            raise ValidationError(f"Safe={safe_address} does not exist or it's still not indexed")
+        if not SafeContract.objects.filter(address=data['safe']).exists():
+            raise ValidationError(f"Safe={data['safe']} does not exist or it's still not indexed")
 
         ethereum_client = EthereumClientProvider()
-        safe = Safe(safe_address, ethereum_client)
+        safe = Safe(data['safe'], ethereum_client)
 
         # Check owners and pending owners
         try:
@@ -303,7 +275,7 @@ class SafeDelegateDeleteSerializer(serializers.Serializer):
                                DelegateSignatureHelper.calculate_hash(delegate, eth_sign=True),
                                DelegateSignatureHelper.calculate_hash(delegate, previous_topt=True),
                                DelegateSignatureHelper.calculate_hash(delegate, eth_sign=True, previous_topt=True)):
-            delegator = self.check_signature(ethereum_client, safe_address, signature, operation_hash, safe_owners)
+            delegator = self.check_signature(signature, operation_hash, safe_owners)
             if delegator:
                 break
 
@@ -333,10 +305,6 @@ class SafeDelegateSerializer(SafeDelegateDeleteSerializer):
         return obj
 
 
-class DataDecoderSerializer(serializers.Serializer):
-    data = HexadecimalField(allow_null=False, allow_blank=False, min_length=4)
-
-
 # ================================================ #
 #            Response Serializers
 # ================================================ #
@@ -346,11 +314,10 @@ class SafeModuleTransactionResponseSerializer(serializers.ModelSerializer):
     data_decoded = serializers.SerializerMethodField()
     transaction_hash = serializers.SerializerMethodField()
     block_number = serializers.SerializerMethodField()
-    is_successful = serializers.SerializerMethodField()
 
     class Meta:
         model = ModuleTransaction
-        fields = ('created', 'execution_date', 'block_number', 'is_successful', 'transaction_hash', 'safe',
+        fields = ('created', 'execution_date', 'block_number', 'transaction_hash', 'safe',
                   'module', 'to', 'value', 'data', 'operation', 'data_decoded')
 
     def get_block_number(self, obj: ModuleTransaction) -> Optional[int]:
@@ -359,22 +326,24 @@ class SafeModuleTransactionResponseSerializer(serializers.ModelSerializer):
     def get_data_decoded(self, obj: SafeCreationInfo) -> Dict[str, Any]:
         return get_data_decoded_from_data(obj.data.tobytes() if obj.data else b'')
 
-    def get_is_successful(self, obj: ModuleTransaction) -> bool:
-        return not obj.failed
-
     def get_transaction_hash(self, obj: ModuleTransaction) -> str:
         return obj.internal_tx.ethereum_tx_id
 
 
 class SafeMultisigConfirmationResponseSerializer(serializers.ModelSerializer):
     submission_date = serializers.DateTimeField(source='created')
+    confirmation_type = serializers.SerializerMethodField()
     transaction_hash = serializers.SerializerMethodField()
     signature = HexadecimalField()
     signature_type = serializers.SerializerMethodField()
 
     class Meta:
         model = MultisigConfirmation
-        fields = ('owner', 'submission_date', 'transaction_hash', 'signature', 'signature_type')
+        fields = ('owner', 'submission_date', 'transaction_hash', 'confirmation_type', 'signature', 'signature_type')
+
+    def get_confirmation_type(self, obj: MultisigConfirmation) -> str:
+        # TODO Remove this field
+        return ConfirmationType.CONFIRMATION.name
 
     def get_transaction_hash(self, obj: MultisigConfirmation) -> str:
         return obj.ethereum_tx_id
@@ -408,7 +377,6 @@ class SafeMultisigTransactionResponseSerializer(SafeMultisigTxSerializerV1):
         if obj.ethereum_tx_id:
             return obj.ethereum_tx.block_id
 
-    @swagger_serializer_method(serializer_or_field=SafeMultisigConfirmationResponseSerializer)
     def get_confirmations(self, obj: MultisigTransaction) -> Dict[str, Any]:
         """
         Filters confirmations queryset
@@ -458,8 +426,8 @@ class SafeBalanceResponseSerializer(serializers.Serializer):
 
 
 class SafeBalanceUsdResponseSerializer(SafeBalanceResponseSerializer):
-    eth_value = serializers.CharField()
-    timestamp = serializers.DateTimeField()
+    balance_usd = serializers.CharField(source='fiat_balance')
+    usd_conversion = serializers.CharField(source='fiat_conversion')
     fiat_balance = serializers.CharField()
     fiat_conversion = serializers.CharField()
     fiat_code = serializers.CharField()
@@ -476,10 +444,6 @@ class SafeCollectibleResponseSerializer(serializers.Serializer):
     description = serializers.CharField()
     image_uri = serializers.CharField()
     metadata = serializers.DictField()
-
-
-class SafeMultisigTransactionEstimateResponseSerializer(serializers.Serializer):
-    safe_tx_gas = serializers.CharField()
 
 
 class SafeDelegateResponseSerializer(serializers.Serializer):
@@ -509,16 +473,12 @@ class SafeInfoResponseSerializer(serializers.Serializer):
     master_copy = EthereumAddressField()
     modules = serializers.ListField(child=EthereumAddressField())
     fallback_handler = EthereumAddressField()
-    guard = EthereumAddressField()
     version = serializers.CharField()
 
 
 class MasterCopyResponseSerializer(serializers.Serializer):
     address = EthereumAddressField()
     version = serializers.CharField()
-    deployer = serializers.CharField()
-    deployed_block_number = serializers.IntegerField(source='initial_block_number')
-    last_indexed_block_number = serializers.IntegerField(source='tx_block_number')
 
 
 class OwnerResponseSerializer(serializers.Serializer):
@@ -634,7 +594,7 @@ class EthereumTxWithTransfersResponseSerializer(serializers.Serializer):
     transfers = TransferWithTokenInfoResponseSerializer(many=True)
     tx_type = serializers.SerializerMethodField()
 
-    def get_tx_type(self, obj) -> str:
+    def get_tx_type(self, obj):
         return TxType.ETHEREUM_TRANSACTION.name
 
     def get_fields(self):
@@ -644,7 +604,7 @@ class EthereumTxWithTransfersResponseSerializer(serializers.Serializer):
         result['from'] = _from
         return result
 
-    def get_block_number(self, obj: EthereumTx) -> Optional[int]:
+    def get_block_number(self, obj: EthereumTx):
         if obj.block_id:
             return obj.block_id
 
@@ -660,7 +620,7 @@ class AnalyticsMultisigTxsBySafeResponseSerializer(serializers.Serializer):
     transactions = serializers.IntegerField()
 
 
-class AllTransactionsSchemaSerializer(serializers.Serializer):
+class _AllTransactionsSchemaSerializer(serializers.Serializer):
     """
     Just for the purpose of documenting, don't use it
     """
