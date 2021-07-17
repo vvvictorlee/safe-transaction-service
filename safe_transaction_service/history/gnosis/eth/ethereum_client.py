@@ -923,7 +923,7 @@ class ParityManager:
             logger.warning("text======%s",response.text)
             logger.warning("response======%s",response)
             results = response.json()
-            if results.result.Result==None:
+            if results['result']['Result']==None:
                 return []
             # if not response.ok:
             #     message = f'Problem calling batch `Trace.Filter` on blocks= ' \
