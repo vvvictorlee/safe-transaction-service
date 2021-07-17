@@ -922,6 +922,7 @@ class ParityManager:
             logger.warning("json======%s",response.json())
             logger.warning("text======%s",response.text)
             logger.warning("response======%s",response)
+            response = response.json()
             if response.result.Result==None:
                 return []
             if not response.ok:
