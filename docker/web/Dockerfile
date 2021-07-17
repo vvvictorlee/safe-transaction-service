@@ -1,8 +1,13 @@
-FROM python:3.9-slim
+FROM python:3.8-slim
 
-ARG APP_HOME=/app
-WORKDIR ${APP_HOME}
 ENV PYTHONUNBUFFERED 1
+WORKDIR /app
+
+# Signal handling for PID1 https://github.com/krallin/tini   https://github.91chifun.workers.dev/https://github.com//krallin/tini/releases/download/v0.19.0/tini
+ENV TINI_VERSION v0.19.0
+# ADD https://github.91chifun.workers.dev/https://github.com/krallin/tini/releases/download/${TINI_VERSION}/tini /tini
+ADD docker/web/tini /tini
+RUN chmod +x /tini
 
 COPY requirements.txt ./
 RUN set -ex \
@@ -21,4 +26,8 @@ RUN set -ex \
         -exec rm -rf '{}' +
 
 COPY . .
-RUN DJANGO_SETTINGS_MODULE=config.settings.local DJANGO_DOT_ENV_FILE=.env.local python manage.py collectstatic --noinput
+RUN DJANGO_SETTINGS_MODULE=config.settings.local DJANGO_DOT_ENV_FILE=.env_local python manage.py collectstatic --noinput
+COPY --from=nginx:stable /usr/sbin/nginx /usr/sbin/
+COPY --from=nginx:stable /etc/nginx /etc/nginx
+
+ENTRYPOINT ["/tini", "--"]
