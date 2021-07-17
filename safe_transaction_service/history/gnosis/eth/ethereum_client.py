@@ -919,10 +919,10 @@ class ParityManager:
                     'params': [parameters]}
             logger.debug("payload======%s",payload)
             response = requests.post(self.ethereum_node_url2, json=payload)
-            logger.warning("json======%s",response.json())
+            # logger.warning("json======%s",response.json())
             logger.warning("text======%s",response.text)
             logger.warning("response======%s",response)
-            results = response.json()
+            results = response.text
             if results['result']['Result']==None:
                 return []
             # if not response.ok:
