@@ -15,10 +15,9 @@ RUN set -ex \
 		build-essential \
 		libssl-dev \
 		" \
-    && sed -i 's#http://deb.debian.org#https://mirrors.163.com#g' /etc/apt/sources.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends $buildDeps \
-    && pip install -i https://pypi.tuna.tsinghua.edu.cn/simple/ --no-cache-dir -r requirements.txt  \
+    && pip install --no-cache-dir -r requirements.txt  \
     && apt-get purge -y --auto-remove $buildDeps \
     && rm -rf /var/lib/apt/lists/* \
     && find /usr/local \
