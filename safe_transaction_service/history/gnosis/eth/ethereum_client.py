@@ -922,15 +922,14 @@ class ParityManager:
             logger.warning("json======%s",response.json())
             logger.warning("text======%s",response.text)
             logger.warning("response======%s",response)
-            response = response.json()
-            if response.result.Result==None:
-                return []
-            if not response.ok:
-                message = f'Problem calling batch `Trace.Filter` on blocks= ' \
-                        f'status_code={response.status_code} result={response.content}'
-                logger.error(message)
-                raise ValueError(message)
             results = response.json()
+            if results.result.Result==None:
+                return []
+            # if not response.ok:
+            #     message = f'Problem calling batch `Trace.Filter` on blocks= ' \
+            #             f'status_code={response.status_code} result={response.content}'
+            #     logger.error(message)
+            #     raise ValueError(message)
             logger.debug(results)
             return self._decode_traces(results)
                 # return self._decode_traces(self.slow_w3.parity.trace_filter(parameters))
