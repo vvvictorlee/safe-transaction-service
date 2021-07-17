@@ -611,7 +611,8 @@ class ParityManager:
         self.w3 = ethereum_client.w3
         self.slow_w3 = Web3(self.ethereum_client.get_slow_provider(timeout=slow_provider_timeout))
         self.ethereum_node_url = ethereum_client.ethereum_node_url
-
+        from django.conf import settings
+        self.ethereum_node_url2=settings.ETHEREUM_NODE_URL2
     # TODO Test with mock
     def _decode_trace_action(self, action: Dict[str, Any]) -> Dict[str, Any]:
         decoded = {
@@ -914,7 +915,21 @@ class ParityManager:
             parameters['toAddress'] = to_address
 
         try:
-            return self._decode_traces(self.slow_w3.parity.trace_filter(parameters))
+            payload = {'id': 1, 'jsonrpc': '2.0', 'method': 'Trace.Filter',
+                    'params': [parameters]}
+            logger.debug("payload======%s",payload)
+            response = requests.post(self.ethereum_node_url2, json=payload)
+            if response.result.Result==None:
+                return []
+            if not response.ok:
+                message = f'Problem calling batch `Trace.Filter` on blocks= ' \
+                        f'status_code={response.status_code} result={response.content}'
+                logger.error(message)
+                raise ValueError(message)
+            results = response.json()
+            logger.debug(results)
+            return self._decode_traces(results)
+                # return self._decode_traces(self.slow_w3.parity.trace_filter(parameters))
         except ParityTraceDecodeException as exc:
             logger.warning('Problem decoding trace: %s - Retrying', exc)
             return self._decode_traces(self.slow_w3.parity.trace_filter(parameters))
